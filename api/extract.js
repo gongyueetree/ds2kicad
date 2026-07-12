@@ -7,6 +7,9 @@ import { extractWithGemini } from '../lib/gemini.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
 
 export default async function handler(req, res) {
+  const t0 = Date.now();
+  const budgetMs = Number(process.env.EXTRACT_BUDGET_MS || 50000); // 平台 60s 上限内主动收口
+  const remain = () => budgetMs - (Date.now() - t0);
   setCors(res, req);
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
@@ -30,10 +33,13 @@ export default async function handler(req, res) {
   const maxBytes = Number(process.env.MAX_PDF_MB || 15) * 1024 * 1024;
   let pdfBuf;
   try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15000); // 下载上限 15s
     const r = await fetch(v.url, {
       redirect: 'follow',
+      signal: ac.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DS2KiCad/0.1)', 'Accept': 'application/pdf,*/*' }
-    });
+    }).finally(() => clearTimeout(timer));
     if (!r.ok) return res.status(502).json({ error: `数据手册下载失败（上游 ${r.status}）` });
     const ab = await r.arrayBuffer();
     if (ab.byteLength > maxBytes) {
@@ -44,7 +50,9 @@ export default async function handler(req, res) {
       return res.status(422).json({ error: '该 URL 返回的不是 PDF 文件' });
     }
   } catch (e) {
-    return res.status(502).json({ error: `数据手册下载失败: ${e.message}` });
+    const cnTip = /ti\.com\.cn/.test(v.url) ? '；ti.com.cn 从海外节点访问较慢，建议改用 www.ti.com 全球域名链接' : '';
+    const msg = e.name === 'AbortError' ? `数据手册下载超时（>15s）${cnTip}` : `数据手册下载失败: ${e.message}${cnTip}`;
+    return res.status(502).json({ error: msg });
   }
 
   // ── 阶段 1：确定性程序化解析（零 AI 成本）──────────────────────────────
@@ -87,10 +95,23 @@ export default async function handler(req, res) {
   try {
     // 相关页切片：只喂首页+管脚页+机械图页+图区页，token/时延双降；失败回退整本
     let geminiBuf = pdfBuf, sliced = false;
-    if (det.relevantPages.length) {
-      const { slicePdf } = await import('../lib/pdfslice.js');
-      const s = await slicePdf(pdfBuf, det.relevantPages);
-      if (s) { geminiBuf = s.buf; sliced = true; }
+    {
+      const { slicePdf, pageCountOf } = await import('../lib/pdfslice.js');
+      let pagesToUse = det.relevantPages;
+      if (!pagesToUse.length) {
+        // 程序化未能定位相关页（扫描版/图形化排版）：确定性兜底切片 = 首 6 页 + 末 8 页（机械图惯例在书末）
+        const total = await pageCountOf(pdfBuf);
+        if (total && total > 16) {
+          pagesToUse = [
+            ...Array.from({ length: 6 }, (_, i) => i + 1),
+            ...Array.from({ length: 8 }, (_, i) => total - 7 + i)
+          ];
+        }
+      }
+      if (pagesToUse.length) {
+        const s = await slicePdf(pdfBuf, pagesToUse);
+        if (s) { geminiBuf = s.buf; sliced = true; }
+      }
     }
     const raw = await extractWithGemini({
       pdfBase64: geminiBuf.toString('base64'),
@@ -98,6 +119,7 @@ export default async function handler(req, res) {
       model: process.env.GEMINI_MODEL,
       sourceUrl: v.url,
       need,
+      deadlineMs: Math.max(10000, remain() - 3000),
       hints: {
         mpn: det.part?.mpn,
         pinCount: need.pins ? undefined : det.pins.length,

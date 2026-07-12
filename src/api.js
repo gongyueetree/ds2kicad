@@ -6,7 +6,12 @@ async function post(path, body) {
     body: JSON.stringify(body)
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || `${path} 返回 ${r.status}`);
+  if (!r.ok) {
+    if (r.status === 504) {
+      throw new Error('服务端处理超时（大 PDF + AI 响应慢）。建议：① 直接重试（AI 偶发慢）② ti.com.cn 链接改用 www.ti.com 全球域名 ③ 确认 Vercel 函数时长上限 ≥60s');
+    }
+    throw new Error(data.error || `${path} 返回 ${r.status}`);
+  }
   return data;
 }
 
