@@ -57,10 +57,17 @@ export default async function handler(req, res) {
   } else try {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 15000); // 下载上限 15s
+    // 国产厂商官网（novosns/ti.com.cn 等）常按 UA/Referer 防盗链：请求头浏览器化 + 带同源 Referer
+    const origin = new URL(v.url).origin;
     const r = await fetch(v.url, {
       redirect: 'follow',
       signal: ac.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DS2KiCad/0.1)', 'Accept': 'application/pdf,*/*' }
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'application/pdf,application/octet-stream,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Referer': origin + '/'
+      }
     }).finally(() => clearTimeout(timer));
     if (!r.ok) return res.status(502).json({ error: `数据手册下载失败（上游 ${r.status}）` });
     const ab = await r.arrayBuffer();

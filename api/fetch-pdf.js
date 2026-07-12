@@ -24,9 +24,11 @@ export default async function handler(request) {
     upstream = await fetch(target.toString(), {
       redirect: 'follow',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; DS2KiCad/0.1; +https://eetree.cn)',
-        'Accept': 'application/pdf,*/*'
-      }
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'Accept': 'application/pdf,application/octet-stream,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Referer': new URL(target).origin + '/'
+    }
     });
   } catch (e) {
     return json({ error: `上游请求失败: ${e.message}` }, 502);
