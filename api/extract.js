@@ -1,5 +1,6 @@
 // api/extract.js — 提取接口（Node Serverless Function）
-// POST { pdfUrl } → { mock, part, packages, recommendedPackageIndex, pins, figures, meta }
+// POST { pdfUrl } 或 { pdfBase64, fileName } → { mock, part, packages, recommendedPackageIndex, pins, figures, meta }
+// 上传通道受 Vercel 请求体 4.5MB 限制：原始 PDF ≤3MB（base64 膨胀 ~37%）
 // 三态外部依赖开关（.env 控制，与 AltPart AI 同款模式）：
 //   GEMINI_API_KEY 未配置或 MOCK_MODE=1 → 返回内置 TMUXL27518 演示数据（mock:true）
 import { validatePdfUrl, sanitizePins, sanitizePinsets, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
@@ -15,9 +16,28 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
   const body = req.body && typeof req.body === 'object' ? req.body : safeParse(req.body);
-  const pdfUrl = body?.pdfUrl;
-  const v = validatePdfUrl(pdfUrl);
-  if (!v.ok) return res.status(400).json({ error: v.error });
+  const uploaded = typeof body?.pdfBase64 === 'string' && body.pdfBase64.length > 0;
+  let v;
+  let uploadedBuf = null;
+  if (uploaded) {
+    const fileName = String(body.fileName || 'uploaded.pdf').slice(0, 120);
+    v = { ok: true, url: `local:${fileName}`, fileName };
+    // 上传内容前置校验（mock 模式同样生效）：base64 → 3MB 上限 → PDF 魔数
+    try {
+      uploadedBuf = Buffer.from(body.pdfBase64, 'base64');
+    } catch {
+      return res.status(400).json({ error: '上传数据不是有效的 base64' });
+    }
+    if (uploadedBuf.length > 3.2 * 1024 * 1024) {
+      return res.status(413).json({ error: '上传 PDF 超过 3MB（平台请求体限制），更大的文件请改用 URL 方式' });
+    }
+    if (uploadedBuf.slice(0, 5).toString() !== '%PDF-') {
+      return res.status(422).json({ error: '上传内容不是 PDF 文件' });
+    }
+  } else {
+    v = validatePdfUrl(body?.pdfUrl);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+  }
 
   const apiKey = process.env.GEMINI_API_KEY;
   const mockMode = process.env.MOCK_MODE === '1' || !apiKey;
@@ -29,10 +49,12 @@ export default async function handler(req, res) {
     });
   }
 
-  // 服务端下载 PDF（尺寸上限保护）
+  // 获取 PDF：上传通道用前置校验过的缓冲；URL 通道服务端下载（尺寸上限保护）
   const maxBytes = Number(process.env.MAX_PDF_MB || 15) * 1024 * 1024;
   let pdfBuf;
-  try {
+  if (uploaded) {
+    pdfBuf = uploadedBuf;
+  } else try {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 15000); // 下载上限 15s
     const r = await fetch(v.url, {

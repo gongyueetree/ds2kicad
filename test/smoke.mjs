@@ -6,7 +6,7 @@ import extractHandler from '../api/extract.js';
 import generateHandler from '../api/generate.js';
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '8mb' }));
 app.all('/api/extract', (req, res) => extractHandler(req, res));
 app.all('/api/generate', (req, res) => generateHandler(req, res));
 const srv = app.listen(3123);
@@ -34,6 +34,17 @@ try {
   check('extract 图区 4 项（框图1+管脚排布2+应用1）', ex.data.figures?.length === 4 && ex.data.figures.filter((f) => f.kind === 'pin_configuration').length === 2);
   check('extract pinsets 2 集（WQFN 含 EP / TSSOP 无）', ex.data.pinsets?.length === 2 && ex.data.pinsets[1].pins.length === 24);
   check('extract 封装带 pinsetId', ex.data.packages?.every((p) => !!p.pinsetId));
+
+  // 1.5 上传通道
+  const upBad = await post('/api/extract', { pdfBase64: Buffer.from('not a pdf').toString('base64'), fileName: 'x.pdf' });
+  check('上传非 PDF 内容 → 422', upBad.status === 422, upBad.data.error);
+  const big = Buffer.alloc(3.4 * 1024 * 1024, 0x41);
+  big.write('%PDF-');
+  const upBig = await post('/api/extract', { pdfBase64: big.toString('base64'), fileName: 'big.pdf' });
+  check('上传超 3MB → 413', upBig.status === 413, upBig.data.error);
+  const okPdf = Buffer.from('%PDF-1.4 fake for mock');
+  const upOk = await post('/api/extract', { pdfBase64: okPdf.toString('base64'), fileName: 'ad5529r.pdf' });
+  check('合法上传（mock 模式）→ 200', upOk.status === 200 && upOk.data.mock === true && /^local:/.test(upOk.data.meta?.pdfUrl), JSON.stringify(upOk.data.meta));
 
   // 2. SSRF 拒绝
   const bad = await post('/api/extract', { pdfUrl: 'http://127.0.0.1/x.pdf' });

@@ -5,7 +5,7 @@ import generateHandler from '../api/generate.js';
 import fetchPdfEdge from '../api/fetch-pdf.js';
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '8mb' }));
 
 app.all('/api/extract', (req, res) => extractHandler(req, res));
 app.all('/api/generate', (req, res) => generateHandler(req, res));

@@ -134,3 +134,6 @@ footer a { color: var(--brand); }
 .fig-title { width: 100%; font-size: 12px; color: var(--ink); margin-top: 4px; }
 @media (max-width: 1000px) { .viewer-grid { grid-template-columns: 1fr; } }
 .model3d-host canvas { max-width: 100%; }
+.upload-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.upload-btn { cursor: pointer; display: inline-block; }
+.upload-row .src-badge { display: inline-flex; align-items: center; gap: 4px; }

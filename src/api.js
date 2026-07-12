@@ -15,5 +15,5 @@ async function post(path, body) {
   return data;
 }
 
-export const apiExtract = (pdfUrl) => post('/api/extract', { pdfUrl });
+export const apiExtract = (payload) => post('/api/extract', typeof payload === 'string' ? { pdfUrl: payload } : payload);
 export const apiGenerate = (payload) => post('/api/generate', payload);

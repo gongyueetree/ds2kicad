@@ -1,6 +1,7 @@
 // src/App.jsx — 主流程：贴 URL → 提取 → 确认（多封装/多 pinset）→ 批量生成 → 预览 → 导出
 import { useEffect, useMemo, useState } from 'react';
 import { apiExtract, apiGenerate } from './api.js';
+import { setLocalPdf } from './pdf.js';
 import PinTable from './components/PinTable.jsx';
 import PackageForm from './components/PackageForm.jsx';
 import FigureEditor from './components/FigureEditor.jsx';
@@ -15,6 +16,7 @@ export default function App() {
   const embedded = params.get('embed') === '1' || window.self !== window.top;
 
   const [url, setUrl] = useState(params.get('pdf') || DEMO_URL);
+  const [file, setFile] = useState(null); // 上传模式的本地 PDF File
   const [phase, setPhase] = useState('idle');
   const [error, setError] = useState('');
   const [extract, setExtract] = useState(null);
@@ -39,8 +41,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const doExtract = async (targetUrl) => {
-    const u = (targetUrl || url).trim();
+  const doExtract = async (targetUrl, fileOverride) => {
+    const theFile = fileOverride || file;
+    const useFile = !targetUrl && theFile;
+    const u = useFile ? `local:${theFile.name}` : (targetUrl || url).trim();
     if (!u) return;
     setPhase('extracting');
     setError('');
@@ -50,7 +54,24 @@ export default function App() {
     setPinsets([]);
     setFigures([]);
     try {
-      const data = await apiExtract(u);
+      let payload;
+      if (useFile) {
+        if (theFile.size > 3 * 1024 * 1024) {
+          throw new Error(`文件 ${(theFile.size / 1048576).toFixed(1)}MB 超过直传上限 3MB（平台请求体限制），请改用 URL 方式`);
+        }
+        const buf = await theFile.arrayBuffer();
+        setLocalPdf(theFile.name, buf); // 前端图区裁剪直接用本地文件，不走代理
+        // 分块 base64（避免一次性字符串拼接的内存峰值/调用栈问题）
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        payload = { pdfBase64: btoa(bin), fileName: theFile.name };
+      } else {
+        payload = { pdfUrl: u };
+      }
+      const data = await apiExtract(payload);
       // pinsets 兼容：老响应无 pinsets 时由 pins 合成单一集
       const sets = Array.isArray(data.pinsets) && data.pinsets.length
         ? data.pinsets
@@ -125,6 +146,27 @@ export default function App() {
           <button className="btn-primary" disabled={phase === 'extracting'} onClick={() => doExtract()}>
             {phase === 'extracting' ? '提取中…（约 20–60 秒）' : '开始提取'}
           </button>
+        </div>
+        <div className="upload-row">
+          <label className="btn-secondary upload-btn">
+            📄 或上传本地 PDF（≤3MB）
+            <input
+              type="file"
+              accept="application/pdf,.pdf"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) { setFile(f); doExtract(null, f); }
+                e.target.value = '';
+              }}
+            />
+          </label>
+          {file && (
+            <span className="src-badge src-parser">
+              {file.name}（{(file.size / 1048576).toFixed(2)}MB）
+              <button className="btn-ghost" onClick={() => setFile(null)} title="清除">✕</button>
+            </span>
+          )}
         </div>
         {error && <p className="error-line">✕ {error}</p>}
         {extract?.mock && (

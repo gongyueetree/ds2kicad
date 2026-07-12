@@ -5,11 +5,25 @@ import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 let cache = { url: null, doc: null };
+let localPdf = null; // 上传模式：{ name, data:ArrayBuffer }
+
+/** 上传模式注册本地 PDF；对应的 loadPdf 标识为 `local:<fileName>` */
+export function setLocalPdf(name, data) {
+  localPdf = { name, data };
+  cache = { url: null, doc: null };
+}
 
 export async function loadPdf(pdfUrl) {
   if (cache.url === pdfUrl && cache.doc) return cache.doc;
-  const proxied = `/api/fetch-pdf?url=${encodeURIComponent(pdfUrl)}`;
-  const doc = await pdfjsLib.getDocument({ url: proxied }).promise;
+  let doc;
+  if (String(pdfUrl).startsWith('local:')) {
+    if (!localPdf) throw new Error('本地 PDF 已失效，请重新上传');
+    // pdf.js 会转移(transfer) ArrayBuffer 所有权，必须拷贝一份，否则第二次加载报 detached
+    doc = await pdfjsLib.getDocument({ data: localPdf.data.slice(0) }).promise;
+  } else {
+    const proxied = `/api/fetch-pdf?url=${encodeURIComponent(pdfUrl)}`;
+    doc = await pdfjsLib.getDocument({ url: proxied }).promise;
+  }
   cache = { url: pdfUrl, doc };
   return doc;
 }
