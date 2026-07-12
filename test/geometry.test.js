@@ -114,7 +114,8 @@ test('DIP landPattern：孔径/焊盘径采用推荐值', () => {
     landPattern: { padW: 1.6, padL: 1.6, rowSpan: 7.62, holeDia: 0.9 }
   };
   const mod = generateFootprint({ mpn: 'LM358', pkg });
-  assert.match(mod, /\(pad "1" thru_hole rect \(at -3\.81 [-\d.]+\) \(size 1\.6 1\.6\) \(drill 0\.9\)/);
+  // KLC F7.2：THT 锚点在 1 脚 → pad "1" 位于原点
+  assert.match(mod, /\(pad "1" thru_hole rect \(at 0 0\) \(size 1\.6 1\.6\) \(drill 0\.9\)/);
 });
 
 test('filterFigures：关键词白名单+曲线黑名单+上限', async () => {
@@ -151,4 +152,50 @@ test('findFigures：Application Curves 说明行不再入选', async () => {
   const figs = findFigures(pages);
   assert.equal(figs.filter((f) => f.kind === 'application').length, 1);
   assert.match(figs[0].title, /Circuit/);
+});
+
+test('KLC 合规：F5.2 第二RefDes / F5.3 庭院网格 / F6.3 圆角上限 / F2.1 命名 / F7.2 模型offset', () => {
+  const soic = {
+    name: 'SOIC-8', family: 'dual', pinCount: 8, pitch: 1.27,
+    bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6.0, height: 1.75,
+    landPattern: { padW: 0.6, padL: 1.55, rowSpan: 5.4 }
+  };
+  const mod = generateFootprint({ mpn: 'LM358', pkg: soic });
+  // F5.2.4 第二 RefDes 居中于本体
+  assert.match(mod, /\(fp_text user "\$\{REFERENCE\}" \(at 0 0\) \(layer "F\.Fab"\)/);
+  // F6.3 圆角半径 ≤0.25mm：padW=0.6 → rratio 应为 0.25/0.6 ≈ 0.417 → 截为 0.25？0.25*0.6=0.15<0.25 → 保持 0.25
+  assert.match(mod, /roundrect_rratio 0\.25\b/);
+  // 大焊盘圆角截断：构造 2mm 宽焊盘应 rratio=0.125
+  const big = generateFootprint({ mpn: 'X', pkg: { name: 'PWR', family: 'dual', pinCount: 4, pitch: 3, bodyLength: 6, bodyWidth: 4, leadSpan: 8, height: 2, landPattern: { padW: 2.0, padL: 2.4, rowSpan: 6 } } });
+  assert.match(big, /roundrect_rratio 0\.104|roundrect_rratio 0\.125/);
+  // F5.3 庭院坐标 0.01 网格（不出现三位小数）
+  const crt = [...mod.matchAll(/F\.CrtYd"\)/g)];
+  assert.ok(crt.length >= 4);
+  assert.ok(!/\(start -?\d+\.\d{3,}/.test(mod.split('F.CrtYd')[0].slice(-200)), '庭院坐标应两位小数内');
+  // F2.1/F3.4 命名带尺寸
+  assert.match(mod, /LM358_SOIC-8_3\.9x4\.9mm_P1\.27mm/);
+
+  const dip = generateFootprint({ mpn: 'LM358', pkg: { name: 'PDIP-8', family: 'dip', pinCount: 8, pitch: 2.54, bodyLength: 9.81, bodyWidth: 6.35, rowSpan: 7.62, height: 5.08 } });
+  // DIP 命名 W 孔距
+  assert.match(dip, /LM358_PDIP-8_W7\.62mm_P2\.54mm/);
+  // F7.2 模型 offset 补偿锚点（x=+rowSpan/2, y=-(+3*pitch/2*?)）：x 应为 3.81
+  assert.match(dip, /\(model "[^"]+" \(offset \(xyz 3\.81 -?[\d.]+ 0\)\)/);
+});
+
+test('KLC 符号：管脚长按位数（25 脚→200mil），低有效名转上划线，pin_names offset', async () => {
+  const { generateKicadSym, generateLegacyLib } = await import('../lib/kicadgen/symbol.js');
+  const pins2 = [
+    { number: '1', name: 'EN#', type: 'input' }, { number: '2', name: 'OUT', type: 'output' },
+    { number: '3', name: 'GND', type: 'power_in' }, { number: '4', name: 'VCC', type: 'power_in' }
+  ];
+  const sym2 = generateKicadSym({ mpn: 'X2', footprintName: 'X2', pins: pins2 });
+  assert.match(sym2, /\(pin_names \(offset 0\.508\)\)/);           // S3.6
+  assert.match(sym2, /\(length 2\.54\)/);                            // ≤2位编号 → 100mil
+  assert.match(sym2, /"~\{EN\}"/);                                   // S4.7
+  const leg2 = generateLegacyLib({ mpn: 'X2', pins: pins2 });
+  assert.match(leg2, /^X ~EN 1 /m);
+  const pins3 = Array.from({ length: 100 }, (_, i) => ({ number: String(i + 1), name: `P${i + 1}`, type: 'passive' }));
+  const sym3 = generateKicadSym({ mpn: 'X3', footprintName: 'X3', pins: pins3 });
+  assert.match(sym3, /\(length 5\.08\)/);                            // 3位编号 → 200mil
+  assert.ok(!/\(length 2\.54\)/.test(sym3), '全符号等长');            // S4.1
 });

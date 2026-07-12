@@ -37,13 +37,17 @@
 - Gemini 响应经 3 次重试（指数退避）+ `repairJSON()`，`maxOutputTokens=16384` 防截断。
 - `DETERMINISTIC_FIRST=0` 可关闭混合策略回到全量 AI（对照调试用）。
 
-## 二、证据绑定与可订购性（v0.4，部分设计参考外部 GPT 版数据模型）
+## 二、KLC 合规（v0.6，对照 klc.kicad.org v3.0.6x）
+
+生成器按 KiCad Library Convention 逐条对齐：符号——S3.3 IC 本体背景填充、S3.6 管脚名偏移 20mil、S3.7 EP=N+1、S4.1 管脚原点 100mil 网格且长度按编号位数（≤2 位 100mil / ≥3 位 200mil，全符号等长）、S4.2 功能分边、S4.7 低有效脚自动转 `~{NAME}` 上划线（识别尾缀 #、前缀 / 或 ~）。封装——F4.2 一脚左上、F5.1 丝印 0.12mm/RefDes 1.0mm/丝印避让焊盘、F5.2 Fab 轮廓 0.1mm + 1 脚斜角 min(1mm, 25% 本体) + 第二 `${REFERENCE}`（居中、0.5–1.0mm 随本体缩放）、F5.3 庭院 0.05mm 线宽/0.01mm 网格/间距 0.25mm（小件 0.15mm）、F6.2 SMD 锚点在本体中心、F6.3 roundrect 圆角半径 ≤0.25mm、F7.2 THT 锚点在 1 脚（3D model offset 自动补偿）、F7.3 THT 一脚方形、F2.1/F3.4/F3.5 命名带尺寸（`SOIC-8_3.9x4.9mm_P1.27mm`、`PDIP-8_W7.62mm_P2.54mm`、QFN 带 `-1EP`/`_EPx.xXx.xmm`）、F9.1 tags 关键词。3D——KLC M2.1 要求官方库用 STEP，本项目 WRL 用于预览与 KiCad 渲染，STEP 生成在路线图（需 CAD 内核）。S4.3 原生 pinstack（KiCad 10）为后续项。建议用官方 kicad-library-utils 的 klc-check 脚本复核产物。
+
+## 三、证据绑定与可订购性（v0.4，部分设计参考外部 GPT 版数据模型）
 
 - **推荐 land pattern 优先**：封装带 `landPattern {padW, padL, rowSpan, holeDia?, sourcePage}`（数据手册附录的推荐焊盘，权威值），焊盘引擎优先采用；缺失或经几何校验自相矛盾（如 padW≥pitch）时弃用并回退规则派生 + 告警。UI ③ 可查看/编辑/清除。
 - **可订购性过滤**：合并家族手册（如 LM358 与 LM158/LM358B 同册）必须按 Package Option Addendum 过滤——仅保留请求型号可订购的封装（LM358 应排除 LM158 专属的 CDIP/LCCC、LM358B 专属的 DDF）。提示词强制执行，每封装记录 `orderableParts`，不确定时保留但写入 `notes`。
 - **封装级溯源**：`drawingId`（机械图编号如 D0008A）、`sourcePages`、`notes` 全部展示在 ③ 并随 part-bundle 导出，复核可直达对应页。
 
-## 三、多封装与管脚定义集（pinset）— v0.3
+## 四、多封装与管脚定义集（pinset）— v0.3
 
 一份数据手册常提供多种封装（如 LM358 的 SOIC-8 / PDIP-8 / TSSOP-8 / VSSOP-8 / DSBGA），且部分封装的管脚定义不同（DSBGA 用球号 A1/B1…）。数据模型：
 
@@ -53,7 +57,7 @@
 - 提取端：多列管脚表（TI 格式 `NAME | D,P,PW | DSBGA | I/O | DESC`）程序化解析为多个 pinset，列头 token 与封装 tiCode 精确匹配完成归属；解析不了列头则降置信交 Gemini（其 schema 同为 pinsets）
 - `/api/generate` 双形状兼容：`{part, items:[{pkg,pins}]}` 批量（新）与 `{part, pkg, pins}` 单封装（旧）
 
-## 四、封装生成引擎覆盖范围
+## 五、封装生成引擎覆盖范围
 
 | 家族 | 封装类型 | 算法要点 |
 |---|---|---|
@@ -64,7 +68,7 @@
 
 3D 模型为参数化 VRML 2.0（`.wrl`，KiCad 约定 1 单位 = 2.54mm）：环氧本体 + 1 脚标记 + 按家族生成引脚（鸥翼两段简化 / QFN 侧焊端 / DIP 直插柱），three.js `VRMLLoader` 在线预览与下载文件同源同构。
 
-## 五、本地开发
+## 六、本地开发
 
 ```bash
 npm install
@@ -76,7 +80,7 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
 
 > macOS 注意：项目目录（尤其 `node_modules`）**严禁放在 iCloud Drive 同步范围内**。
 
-## 六、部署到 Vercel
+## 七、部署到 Vercel
 
 1. 推送本仓库到 GitHub，Vercel 导入项目（框架自动识别为 Vite）。
 2. Environment Variables 中配置：
@@ -94,7 +98,7 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
 | Gemini inline 请求 20MB 上限 | PDF 下载上限默认 15MB（`MAX_PDF_MB`），超限返回 413 |
 | 函数无状态 | 无任何持久化；PDF 按次下载，前端 pdf.js 侧有文档缓存 |
 
-## 七、ezPLM 插件集成（预留协议）
+## 八、ezPLM 插件集成（预留协议）
 
 **嵌入方式**：iframe 加载 `https://<deployment>/?embed=1&pdf=<encodeURIComponent(datasheetUrl)>`
 
@@ -122,7 +126,7 @@ window.addEventListener('message', (e) => {
 
 **服务端复用**：`lib/kicadgen` 与 `lib/validate.js` 为零依赖纯 ESM 模块，ezPLM 后端可直接 import 复用，无需经 HTTP。
 
-## 八、目录结构
+## 九、目录结构
 
 ```
 api/            Vercel 函数：extract（Gemini 提取）、generate（确定性生成）、fetch-pdf（Edge PDF 代理）
@@ -135,7 +139,7 @@ server/dev.js   本地开发 API 宿主（不部署）
 test/           单元测试 + 端到端冒烟
 ```
 
-## 九、已知边界与后续路线
+## 十、已知边界与后续路线
 
 - **管脚↔物理位置映射**：封装引脚位置按编号 1..N 标准排布；若器件管脚编号非标准顺序（极少见），需在封装参数中人工核对。
 - **异形封装**（BGA / LGA / 非对称引脚）暂不支持，属 v0.2 范围；QFN 引脚数非 4 倍数时自动回退 dual 并给出 warning。
