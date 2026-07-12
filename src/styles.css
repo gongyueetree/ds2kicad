@@ -82,7 +82,7 @@ button:disabled { opacity: .55; cursor: default; }
 .stage-empty { border: 1px dashed var(--line); border-radius: 8px; padding: 40px; text-align: center; color: var(--muted); }
 
 .svg-stage { position: relative; border: 1px solid var(--line); border-radius: 8px; background: #fdfdfa; }
-.svg-stage svg { display: block; width: 100%; height: auto; cursor: grab; }
+.svg-stage svg { display: block; width: 100%; height: auto; cursor: grab; user-select: none; -webkit-user-select: none; }
 .stage-help { position: absolute; right: 10px; bottom: 8px; color: var(--muted); font-size: 12px; pointer-events: none; }
 .model3d-host { height: 420px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .model3d-host canvas { display: block; }
@@ -112,7 +112,7 @@ footer a { color: var(--brand); }
 .lp-details summary { cursor: pointer; }
 
 /* 三栏并排预览 + 管脚联动高亮 */
-.viewer-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.viewer-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .viewer-cell h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
 .viewer-grid .svg-stage svg { height: 380px; }
 .viewer-grid .model3d-host { height: 380px; }
@@ -133,3 +133,4 @@ footer a { color: var(--brand); }
 .fig-card figcaption { padding: 8px 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .fig-title { width: 100%; font-size: 12px; color: var(--ink); margin-top: 4px; }
 @media (max-width: 1000px) { .viewer-grid { grid-template-columns: 1fr; } }
+.model3d-host canvas { max-width: 100%; }

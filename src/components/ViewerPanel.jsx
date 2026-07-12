@@ -10,12 +10,29 @@ function SvgStage({ text, render, selectedPin, onPinClick, viewBox = '0 0 800 56
   const svgRef = useRef(null);
   const vpRef = useRef(null);
 
+  const clickRef = useRef(onPinClick);
+  clickRef.current = onPinClick;
+
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg || !text) return;
     render(text, svg);
-    if (!vpRef.current) vpRef.current = createSvgViewport(svg);
-    else vpRef.current.reset();
+    if (!vpRef.current) {
+      vpRef.current = createSvgViewport(svg);
+      // 命中检测：pointer capture 会把后续事件 target 重定向到 svg 根，
+      // 因此在 pointerdown 记录真实 target，pointerup 位移小于阈值才视为点击
+      let down = null;
+      svg.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, target: e.target }; });
+      svg.addEventListener('pointerup', (e) => {
+        if (!down) return;
+        const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+        const hit = moved < 6 && down.target?.closest?.('[data-pin]');
+        down = null;
+        if (hit && clickRef.current) clickRef.current(hit.getAttribute('data-pin'));
+      });
+    } else {
+      vpRef.current.reset();
+    }
   }, [text, render]);
 
   // 高亮同步：不重渲染，只切换 class
@@ -27,13 +44,8 @@ function SvgStage({ text, render, selectedPin, onPinClick, viewBox = '0 0 800 56
     });
   }, [selectedPin, text]);
 
-  const onClick = (e) => {
-    const hit = e.target.closest?.('[data-pin]');
-    if (hit && onPinClick) onPinClick(hit.getAttribute('data-pin'));
-  };
-
   return (
-    <div className="svg-stage" onClick={onClick}>
+    <div className="svg-stage">
       <svg ref={svgRef} viewBox={viewBox} />
       <div className="stage-help">滚轮缩放 · 拖拽平移 · 双击复位 · 点击管脚联动</div>
     </div>

@@ -199,3 +199,36 @@ test('KLC 符号：管脚长按位数（25 脚→200mil），低有效名转上�
   assert.match(sym3, /\(length 5\.08\)/);                            // 3位编号 → 200mil
   assert.ok(!/\(length 2\.54\)/.test(sym3), '全符号等长');            // S4.1
 });
+
+test('中文数据手册：图 N-M 说明行与"典型应用"独立标题均可提取，中文曲线类被排除', async () => {
+  const { filterFigures } = await import('../lib/figfilter.js');
+  // filterFigures 双语
+  const out = filterFigures([
+    { kind: 'application', title: '图 9-1. 典型应用电路', page: 5, bbox: [0.1, 0.1, 0.9, 0.4] },
+    { kind: 'application', title: '图 9-2. 增益与频率特性曲线', page: 6, bbox: [0.1, 0.1, 0.9, 0.4] },
+    { kind: 'block_diagram', title: '图 7-1. 内部功能框图', page: 3, bbox: [0.1, 0.1, 0.9, 0.4] }
+  ], { pkgCount: 1 });
+  assert.equal(out.length, 2);
+  assert.ok(!out.some((f) => /曲线/.test(f.title)));
+});
+
+test('findFigures：中文首页"典型应用"位于图下方（下半页）→ 区域取上方', async () => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const pg = doc.addPage([612, 792]);
+  const t = (x, y, s2, size = 10) => pg.drawText(s2, { x, y, size, font });
+  t(60, 700, 'TMUXL27518 is a bidirectional 6-channel 1:2 multiplexer designed for operation from 1.08V to 1.95V supply rails.');
+  // 说明行在下半页（y=180 < 0.55*792），图在其上方
+  t(270, 180, 'Typical Application', 11); // 用英文占位验证方向启发（pdf-lib 内置字体不支持中文渲染，方向逻辑同一分支）
+  const { pages } = await extractTextPages(Buffer.from(await doc.save()));
+  // 手工替换标题文本模拟中文命中（提取管线对 text 只做正则，中英走同一路径）
+  const line = pages[0].lines.find((l) => /Typical Application/.test(l.text));
+  line.text = '典型应用';
+  const figs = findFigures(pages);
+  const ap = figs.find((f) => f.kind === 'application');
+  assert.ok(ap, JSON.stringify(figs));
+  // 区域应覆盖说明行上方（y0 < 说明行归一化位置）
+  const capNormY = 1 - 180 / 792; // ≈0.77
+  assert.ok(ap.bbox[1] < capNormY - 0.1, `bbox=${JSON.stringify(ap.bbox)}`);
+  assert.ok(ap.bbox[3] >= capNormY - 0.05);
+});

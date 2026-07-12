@@ -56,7 +56,7 @@ export function renderLegacySymbol(txt, svg, selectedUnit = 1) {
         x: Math.min(x1, x2), y: Math.min(y1, y2),
         width: Math.abs(x2 - x1), height: Math.abs(y2 - y1),
         fill: p[p.length - 1]?.toLowerCase() === 'f' ? '#fffdb5' : 'none',
-        stroke: '#a40000', 'stroke-width': 10 / scale * 0.9
+        stroke: '#8a0e0e', 'stroke-width': 2.4 / scale
       }));
     } else if (p[0] === 'X') {
       const name = p[1], num = p[2], x = +p[3], y = +p[4], len = +p[5], ori = p[6];
@@ -67,12 +67,16 @@ export function renderLegacySymbol(txt, svg, selectedUnit = 1) {
       g.appendChild(pinG);
       // 加宽的透明命中区，便于点击细线
       pinG.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: 'transparent', 'stroke-width': 40 / scale }));
-      pinG.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: '#a40000', 'stroke-width': 8 / scale * 0.9, class: 'pin-stroke' }));
-      pinG.appendChild(el('circle', { cx: x, cy: y, r: 11, fill: 'none', stroke: '#a40000', 'stroke-width': 3 / scale * 0.9, class: 'pin-stroke' }));
+      pinG.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: '#8a0e0e', 'stroke-width': 1.8 / scale, class: 'pin-stroke' }));
+      pinG.appendChild(el('circle', { cx: x, cy: y, r: 9, fill: 'none', stroke: '#8a0e0e', 'stroke-width': 1.3 / scale, class: 'pin-stroke' }));
 
       const outer = toScreen(x, y), inner = toScreen(x2, y2);
       const dx = inner.x - outer.x, dy = inner.y - outer.y, dist = Math.hypot(dx, dy) || 1;
       const ux = dx / dist, uy = dy / dist;
+      // 屏幕上每 100mil 网格的像素数 → 文本取其 55%/45%（对应 KiCad 50mil 文本）
+      const pxCell = 100 * scale;
+      const nameSize = Math.max(9, Math.min(16, pxCell * 0.55));
+      const numSize = Math.max(8, Math.min(13, pxCell * 0.45));
       const pinTextG = el('g', { 'data-pin': num, class: 'hit-pin' });
       textLayer.appendChild(pinTextG);
       const mkText = (text, pos, size, { anchor = 'middle', rotation = 0, color = '#006b68', weight = '500' } = {}) => {
@@ -81,23 +85,25 @@ export function renderLegacySymbol(txt, svg, selectedUnit = 1) {
           transform: rotation ? `rotate(${rotation} ${pos.x} ${pos.y})` : undefined,
           fill: color, 'font-size': size, 'font-family': 'Arial, sans-serif', 'font-weight': weight,
           'text-anchor': anchor, 'dominant-baseline': 'middle',
-          'paint-order': 'stroke', stroke: '#ffffff', 'stroke-width': '2.5', 'stroke-linejoin': 'round'
+          'paint-order': 'stroke', stroke: '#ffffff', 'stroke-width': '1.8', 'stroke-linejoin': 'round'
         });
         t.textContent = text;
         pinTextG.appendChild(t);
       };
       const isVertical = ori === 'U' || ori === 'D';
-      const nameAt = { x: inner.x + ux * (isVertical ? 42 : 14), y: inner.y + uy * (isVertical ? 42 : 14) };
+      const nameGap = Math.max(6, nameSize * 0.55);
+      const nameAt = { x: inner.x + ux * (isVertical ? nameSize * 2 : nameGap), y: inner.y + uy * (isVertical ? nameSize * 2 : nameGap) };
       let nameAnchor = 'middle', nameRotation = 0;
       if (ori === 'R') nameAnchor = 'start';
       else if (ori === 'L') nameAnchor = 'end';
       else nameRotation = -90;
-      const base = { x: outer.x + ux * 16, y: outer.y + uy * 16 };
+      // KiCad 风格：编号位于管脚线中点上方（竖直管脚放左侧）
+      const mid = { x: (outer.x + inner.x) / 2, y: (outer.y + inner.y) / 2 };
       let numAt, numAnchor = 'middle';
-      if (Math.abs(dx) >= Math.abs(dy)) numAt = { x: base.x, y: base.y - 14 };
-      else { numAt = { x: base.x - 13, y: base.y }; numAnchor = 'end'; }
-      if (name && name !== '~') mkText(name, nameAt, 15, { anchor: nameAnchor, rotation: nameRotation });
-      if (num && num !== '~') mkText(num, numAt, 13, { anchor: numAnchor, color: '#a40000' });
+      if (Math.abs(dx) >= Math.abs(dy)) numAt = { x: mid.x, y: mid.y - Math.max(5, numSize * 0.5) };
+      else { numAt = { x: mid.x - Math.max(5, numSize * 0.5), y: mid.y }; numAnchor = 'end'; }
+      if (name && name !== '~') mkText(name, nameAt, nameSize, { anchor: nameAnchor, rotation: nameRotation, color: '#008080' });
+      if (num && num !== '~') mkText(num, numAt, numSize, { anchor: numAnchor, color: '#8a0e0e' });
     }
   }
 }
