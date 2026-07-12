@@ -32,6 +32,8 @@ try {
   check('extract 管脚 25 项（含 EP）', ex.data.pins?.length === 25, `实际 ${ex.data.pins?.length}`);
   check('extract 封装候选含 family', ex.data.packages?.[0]?.family === 'qfn');
   check('extract 图区 2 项', ex.data.figures?.length === 2);
+  check('extract pinsets 2 集（WQFN 含 EP / TSSOP 无）', ex.data.pinsets?.length === 2 && ex.data.pinsets[1].pins.length === 24);
+  check('extract 封装带 pinsetId', ex.data.packages?.every((p) => !!p.pinsetId));
 
   // 2. SSRF 拒绝
   const bad = await post('/api/extract', { pdfUrl: 'http://127.0.0.1/x.pdf' });
@@ -39,22 +41,26 @@ try {
   const bad2 = await post('/api/extract', { pdfUrl: 'ftp://x.com/a.pdf' });
   check('非 http 拒绝 400', bad2.status === 400);
 
-  // 3. 提取 → 生成 回环
+  // 3. 提取 → 生成 回环（新形状：多封装批量）
+  const sets = Object.fromEntries(ex.data.pinsets.map((s2) => [s2.id, s2.pins]));
   const payload = {
     part: ex.data.part,
-    pkg: ex.data.packages[ex.data.recommendedPackageIndex],
-    pins: ex.data.pins
+    items: ex.data.packages.map((p) => ({ pkg: p, pins: sets[p.pinsetId] }))
   };
   const gen = await post('/api/generate', payload);
   check('generate 200', gen.status === 200, JSON.stringify(gen.data.error || ''));
-  check('generate 四文件齐全', ['kicadSym', 'kicadMod', 'wrl', 'legacyLib'].every((k) => gen.data.files?.[k]?.length > 100));
-  check('generate 文件名正确', gen.data.names?.kicadSym === 'TMUXL27518.kicad_sym', gen.data.names?.kicadSym);
-  const padCount = (gen.data.files.kicadMod.match(/\(pad "/g) || []).length;
+  check('bundle 两个封装 items', gen.data.items?.length === 2);
+  check('bundle 两个符号变体（EP 差异）', gen.data.symbols?.length === 2, gen.data.symbols?.map((s2) => s2.name).join());
+  check('bundle 合并库文件名', gen.data.names?.kicadSym === 'TMUXL27518.kicad_sym', gen.data.names?.kicadSym);
+  const padCount = (gen.data.items[0].files.kicadMod.match(/\(pad "/g) || []).length;
   check('QFN-24 焊盘 24+EP', padCount === 25, `实际 ${padCount}`);
-  check('generate 无阻断性告警', Array.isArray(gen.data.warnings), JSON.stringify(gen.data.warnings));
+  check('每封装均有封装+3D', gen.data.items.every((it) => it.files.kicadMod && it.files.wrl));
+  // 旧形状兼容
+  const old = await post('/api/generate', { part: ex.data.part, pkg: ex.data.packages[0], pins: ex.data.pins });
+  check('旧形状单封装兼容', old.status === 200 && old.data.files?.kicadSym?.length > 100);
 
   // 4. 空管脚 → 422
-  const empty = await post('/api/generate', { part: { mpn: 'X' }, pkg: payload.pkg, pins: [] });
+  const empty = await post('/api/generate', { part: { mpn: 'X' }, pkg: ex.data.packages[0], pins: [] });
   check('空管脚返回 422', empty.status === 422);
 
   // 5. 非法 JSON 请求体

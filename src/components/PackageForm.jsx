@@ -1,7 +1,7 @@
 // src/components/PackageForm.jsx — 封装参数确认表单（确定性封装引擎的输入）
 import { PACKAGE_TYPES } from '../../lib/validate.js';
 
-const FAMILY_LABEL = { dual: '双列贴片（SOIC/TSSOP/MSOP…）', qfn: 'QFN/DFN（含 EP）', dip: 'DIP 通孔', sot23: 'SOT-23（3 脚）' };
+const FAMILY_LABEL = { dual: '双列贴片（SOIC/TSSOP/MSOP…）', qfn: 'QFN/DFN（含 EP）', dip: 'DIP 通孔', sot23: 'SOT-23（3 脚）', bga: 'BGA/DSBGA（暂仅符号）' };
 
 const FIELDS = [
   ['pinCount', '引脚数', ''],
@@ -17,7 +17,7 @@ const FIELDS = [
   ['rowSpan', '孔距（DIP）', 'mm']
 ];
 
-export default function PackageForm({ packages, selectedIndex, pkg, onSelect, onChange }) {
+export default function PackageForm({ packages, selectedIndex, pkg, pinsets = [], onSelect, onChange }) {
   const upd = (key, raw) => {
     const value = raw === '' ? null : Number(raw);
     onChange({ ...pkg, [key]: Number.isFinite(value) ? value : (raw === '' ? null : pkg[key]) });
@@ -29,9 +29,28 @@ export default function PackageForm({ packages, selectedIndex, pkg, onSelect, on
           数据手册中的封装候选：
           <select value={selectedIndex} onChange={(e) => onSelect(Number(e.target.value))}>
             {packages.map((p, i) => (
-              <option key={i} value={i}>{p.name}{p.tiCode ? `（${p.tiCode}）` : ''} · {p.pinCount} 脚</option>
+              <option key={i} value={i}>{p.include === false ? '✗ ' : '✓ '}{p.name}{p.tiCode ? `（${p.tiCode}）` : ''} · {p.pinCount} 脚</option>
             ))}
           </select>
+        </label>
+      )}
+      <label className="pkg-include">
+        <input
+          type="checkbox"
+          checked={pkg.include !== false}
+          onChange={(e) => onChange({ ...pkg, include: e.target.checked })}
+        />
+        将此封装包含在生成中（每个勾选的封装各生成一套 .kicad_mod + .wrl）
+      </label>
+      {pinsets.length > 1 && (
+        <label className="pkg-select">
+          管脚定义集（pinset）：
+          <select value={pkg.pinsetId} onChange={(e) => onChange({ ...pkg, pinsetId: e.target.value })}>
+            {pinsets.map((s) => (
+              <option key={s.id} value={s.id}>{s.id}{s.label ? ` — ${s.label}` : ''} · {s.pins.length} 脚</option>
+            ))}
+          </select>
+          <span className="hint" style={{ marginLeft: 8 }}>管脚编号不同的封装（如 DSBGA）会生成独立符号变体</span>
         </label>
       )}
       <label className="pkg-select">

@@ -1,4 +1,4 @@
-// src/components/ExportPanel.jsx — 导出：单文件 / ZIP 打包 / Part Bundle JSON / ezPLM postMessage
+// src/components/ExportPanel.jsx — 导出：单文件 / ZIP 全量打包 / Part Bundle JSON v2 / ezPLM postMessage
 import { useState } from 'react';
 import JSZip from 'jszip';
 import { exportFigures } from './FigureEditor.jsx';
@@ -14,37 +14,39 @@ function download(name, content, mime = 'text/plain') {
 
 const dataUrlToBlob = (dataUrl) => fetch(dataUrl).then((r) => r.blob());
 
-export default function ExportPanel({ result, confirmed, pdfUrl, embedded }) {
+export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded }) {
   const [busy, setBusy] = useState('');
-  if (!result) return null;
-  const { files, names } = result;
+  if (!bundle) return null;
 
   const buildBundleJson = (figuresWithImages) => JSON.stringify({
-    schema: 'ds2kicad.part-bundle.v1',
+    schema: 'ds2kicad.part-bundle.v2',
     generatedAt: new Date().toISOString(),
     source: { datasheetUrl: pdfUrl },
     part: confirmed.part,
-    package: confirmed.pkg,
-    pins: confirmed.pins,
+    pinsets: confirmed.pinsets,
+    packages: confirmed.packages.map((p) => ({ ...p })),
+    symbols: bundle.symbols.map((s) => ({ name: s.name, packages: s.packages })),
+    items: bundle.items.map((it) => ({ pkgName: it.pkgName, symbolName: it.symbolName, files: it.names })),
     figures: (figuresWithImages || confirmed.figures).map((f) => ({
       kind: f.kind, title: f.title, page: f.page, bbox: f.bbox,
       ...(f.dataUrl ? { pngDataUrl: f.dataUrl } : {})
     })),
-    files: { ...names },
-    warnings: result.warnings || []
+    files: { kicadSym: bundle.names.kicadSym },
+    warnings: bundle.warnings || []
   }, null, 2);
 
   const exportZip = async () => {
     setBusy('正在打包…');
     try {
       const zip = new JSZip();
-      zip.file(names.kicadSym, files.kicadSym);
-      zip.file(names.kicadMod, files.kicadMod);
-      zip.file(names.wrl, files.wrl);
-      zip.file(names.legacyLib, files.legacyLib);
-      let figs = confirmed.figures;
+      zip.file(bundle.names.kicadSym, bundle.files.kicadSym);
+      for (const s of bundle.symbols) zip.file(`${s.name}.lib`, s.legacyLib);
+      for (const it of bundle.items) {
+        if (it.files.kicadMod) zip.file(it.names.kicadMod, it.files.kicadMod);
+        if (it.files.wrl) zip.file(it.names.wrl, it.files.wrl);
+      }
       try {
-        figs = await exportFigures(pdfUrl, confirmed.figures);
+        const figs = await exportFigures(pdfUrl, confirmed.figures);
         for (let i = 0; i < figs.length; i++) {
           const f = figs[i];
           const blob = await dataUrlToBlob(f.dataUrl);
@@ -69,9 +71,12 @@ export default function ExportPanel({ result, confirmed, pdfUrl, embedded }) {
       try { figs = await exportFigures(pdfUrl, confirmed.figures); } catch { /* 无图也发送 */ }
       const payload = {
         type: 'ezplm:ds2kicad:result',
-        version: 1,
+        version: 2,
         bundle: JSON.parse(buildBundleJson(figs)),
-        files
+        files: {
+          kicadSym: bundle.files.kicadSym,
+          items: bundle.items.map((it) => ({ pkgName: it.pkgName, ...it.files, ...it.names }))
+        }
       };
       window.parent.postMessage(payload, '*'); // ezPLM 侧按来源域校验；正式集成时收敛 targetOrigin
       setBusy('已通过 postMessage 发送给宿主页面 ✓');
@@ -84,19 +89,25 @@ export default function ExportPanel({ result, confirmed, pdfUrl, embedded }) {
   return (
     <div className="export-panel">
       <div className="export-row">
-        <button className="btn-secondary" onClick={() => download(names.kicadSym, files.kicadSym)}>⬇ {names.kicadSym}</button>
-        <button className="btn-secondary" onClick={() => download(names.kicadMod, files.kicadMod)}>⬇ {names.kicadMod}</button>
-        <button className="btn-secondary" onClick={() => download(names.wrl, files.wrl)}>⬇ {names.wrl}</button>
+        <button className="btn-secondary" onClick={() => download(bundle.names.kicadSym, bundle.files.kicadSym)}>
+          ⬇ {bundle.names.kicadSym}（{bundle.symbols.length} 符号）
+        </button>
+        {bundle.items.map((it, i) => it.files.kicadMod && (
+          <span key={i} style={{ display: 'inline-flex', gap: 8 }}>
+            <button className="btn-secondary" onClick={() => download(it.names.kicadMod, it.files.kicadMod)}>⬇ {it.names.kicadMod}</button>
+            <button className="btn-secondary" onClick={() => download(it.names.wrl, it.files.wrl)}>⬇ {it.names.wrl}</button>
+          </span>
+        ))}
         <button className="btn-secondary" onClick={() => download('part-bundle.json', buildBundleJson(null), 'application/json')}>⬇ part-bundle.json</button>
       </div>
       <div className="export-row">
-        <button className="btn-primary" onClick={exportZip}>📦 打包下载 ZIP（含截图 PNG）</button>
+        <button className="btn-primary" onClick={exportZip}>📦 打包下载 ZIP（全部封装 + 截图 PNG）</button>
         {embedded && <button className="btn-primary" onClick={sendToEzplm}>↗ 发送到 ezPLM（postMessage）</button>}
       </div>
       {busy && <p className="status-line">{busy}</p>}
-      {result.warnings?.length > 0 && (
+      {bundle.warnings?.length > 0 && (
         <div className="warn-box">
-          {result.warnings.map((w, i) => <p key={i}>⚠ {w}</p>)}
+          {bundle.warnings.map((w, i) => <p key={i}>⚠ {w}</p>)}
         </div>
       )}
     </div>

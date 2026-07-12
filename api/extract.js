@@ -2,7 +2,7 @@
 // POST { pdfUrl } → { mock, part, packages, recommendedPackageIndex, pins, figures, meta }
 // 三态外部依赖开关（.env 控制，与 AltPart AI 同款模式）：
 //   GEMINI_API_KEY 未配置或 MOCK_MODE=1 → 返回内置 TMUXL27518 演示数据（mock:true）
-import { validatePdfUrl, sanitizePins, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
+import { validatePdfUrl, sanitizePins, sanitizePinsets, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
 import { extractWithGemini } from '../lib/gemini.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
 
@@ -49,11 +49,11 @@ export default async function handler(req, res) {
 
   // ── 阶段 1：确定性程序化解析（零 AI 成本）──────────────────────────────
   // AI 只在程序化拿不到时按需介入；每个字段带来源溯源（parser / gemini）。
-  let det = { textOk: false, part: null, pins: [], pinConfidence: 'low', figures: [], relevantPages: [] };
+  let det = { textOk: false, part: null, pins: [], pinsets: [], pinConfidence: 'low', figures: [], relevantPages: [], assignPinsets: null };
   if (process.env.DETERMINISTIC_FIRST !== '0') {
     try {
       const { extractTextPages } = await import('../lib/pdftext.js');
-      const { findPartInfo, parsePinTable, findFigures, selectRelevantPages } = await import('../lib/heuristics.js');
+      const { findPartInfo, parsePinTable, findFigures, selectRelevantPages, assignPinsets } = await import('../lib/heuristics.js');
       const { pages } = await extractTextPages(pdfBuf);
       const totalText = pages.reduce((n, p) => n + p.lines.length, 0);
       if (totalText > 20) { // 有文本层（非纯扫描版）
@@ -64,9 +64,11 @@ export default async function handler(req, res) {
           textOk: true,
           part: pi.ok ? pi.part : null,
           pins: pt.pins,
+          pinsets: pt.pinsets,
           pinConfidence: pt.confidence,
           figures: figs,
-          relevantPages: selectRelevantPages(pages, figs)
+          relevantPages: selectRelevantPages(pages, figs),
+          assignPinsets
         };
       }
     } catch (e) {
@@ -103,10 +105,21 @@ export default async function handler(req, res) {
       }
     });
 
-    const packages = (Array.isArray(raw?.packages) ? raw.packages : [])
+    let packages = (Array.isArray(raw?.packages) ? raw.packages : [])
       .map((p) => ({ ...sanitizePackage(p), family: guessFamily(p?.type || p?.name) }));
     if (!packages.length) packages.push(sanitizePackage({}));
     const idx = Math.min(Math.max(0, Math.round(Number(raw?.recommendedPackageIndex) || 0)), packages.length - 1);
+
+    // pinsets：程序化高置信用解析结果（并按列头标签归属封装）；否则用 Gemini 的 pinsets（pinsetId 由 AI 标注）
+    let pinsets;
+    if (!need.pins) {
+      pinsets = sanitizePinsets(det.pinsets, det.pins);
+      if (det.assignPinsets) packages = det.assignPinsets(packages, pinsets);
+    } else {
+      pinsets = sanitizePinsets(raw?.pinsets, raw?.pins);
+      const valid = new Set(pinsets.map((s2) => s2.id));
+      packages = packages.map((p) => valid.has(p.pinsetId) ? p : { ...p, pinsetId: pinsets[0]?.id || 'default' });
+    }
 
     const part = need.part
       ? {
@@ -116,7 +129,8 @@ export default async function handler(req, res) {
           description_zh: String(raw?.part?.description_zh || '').trim()
         }
       : det.part;
-    const pins = need.pins ? sanitizePins(raw?.pins) : sanitizePins(det.pins);
+    const recSet = pinsets.find((s2) => s2.id === packages[idx].pinsetId) || pinsets[0];
+    const pins = recSet ? recSet.pins : [];
     const figures = need.figures ? sanitizeFigures(raw?.figures) : sanitizeFigures(det.figures);
 
     return res.status(200).json({
@@ -125,6 +139,7 @@ export default async function handler(req, res) {
       packages,
       recommendedPackageIndex: idx,
       pins,
+      pinsets,
       figures,
       sources: {
         part: need.part ? 'gemini' : 'parser',
@@ -150,6 +165,7 @@ export default async function handler(req, res) {
         packages: [sanitizePackage({ pinCount: det.pins.length })],
         recommendedPackageIndex: 0,
         pins: sanitizePins(det.pins),
+        pinsets: sanitizePinsets(det.pinsets, det.pins),
         figures: sanitizeFigures(det.figures),
         sources: { part: 'parser', packages: 'fallback', pins: 'parser', figures: 'parser' },
         meta: { mode: 'degraded', warning: `AI 不可用（${e.message}），封装尺寸为默认值，请手工核对`, pdfUrl: v.url, pdfBytes: pdfBuf.length }

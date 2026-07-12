@@ -1,4 +1,4 @@
-// src/App.jsx — 主流程：贴 URL → AI 提取 → 用户确认 → 确定性生成 → 在线预览 → 导出/回传 ezPLM
+// src/App.jsx — 主流程：贴 URL → 提取 → 确认（多封装/多 pinset）→ 批量生成 → 预览 → 导出
 import { useEffect, useMemo, useState } from 'react';
 import { apiExtract, apiGenerate } from './api.js';
 import PinTable from './components/PinTable.jsx';
@@ -14,18 +14,17 @@ export default function App() {
   const embedded = params.get('embed') === '1' || window.self !== window.top;
 
   const [url, setUrl] = useState(params.get('pdf') || DEMO_URL);
-  const [phase, setPhase] = useState('idle'); // idle | extracting | confirm | generating
+  const [phase, setPhase] = useState('idle');
   const [error, setError] = useState('');
-  const [extract, setExtract] = useState(null);   // API 原始返回
-  const [pins, setPins] = useState([]);
+  const [extract, setExtract] = useState(null);
+  const [pkgs, setPkgs] = useState([]);        // 每项含 include 标志与 pinsetId
   const [pkgIndex, setPkgIndex] = useState(0);
-  const [pkg, setPkg] = useState(null);
+  const [pinsets, setPinsets] = useState([]);  // [{id,label,pins}]
   const [figures, setFigures] = useState([]);
   const [part, setPart] = useState(null);
   const [genResult, setGenResult] = useState(null);
   const [confirmTab, setConfirmTab] = useState('pins');
 
-  // ezPLM 集成：宿主可 postMessage 注入 PDF URL
   useEffect(() => {
     const onMsg = (e) => {
       const d = e.data;
@@ -47,13 +46,22 @@ export default function App() {
     setGenResult(null);
     try {
       const data = await apiExtract(u);
+      // pinsets 兼容：老响应无 pinsets 时由 pins 合成单一集
+      const sets = Array.isArray(data.pinsets) && data.pinsets.length
+        ? data.pinsets
+        : [{ id: 'default', label: '', pins: data.pins || [] }];
+      const validIds = new Set(sets.map((s) => s.id));
+      const packages = (data.packages || []).map((p) => ({
+        ...p,
+        pinsetId: validIds.has(p.pinsetId) ? p.pinsetId : sets[0].id,
+        include: true
+      }));
       setExtract({ ...data, pdfUrl: u });
       setPart(data.part);
-      setPins(data.pins);
+      setPinsets(sets);
+      setPkgs(packages);
       setFigures(data.figures);
-      const idx = data.recommendedPackageIndex || 0;
-      setPkgIndex(idx);
-      setPkg(data.packages[idx]);
+      setPkgIndex(Math.min(data.recommendedPackageIndex || 0, packages.length - 1));
       setPhase('confirm');
       setConfirmTab('pins');
     } catch (e) {
@@ -62,16 +70,20 @@ export default function App() {
     }
   };
 
-  const selectPackage = (i) => {
-    setPkgIndex(i);
-    setPkg(extract.packages[i]);
-  };
+  const pkg = pkgs[pkgIndex] || null;
+  const pinsOf = (p) => pinsets.find((s) => s.id === p?.pinsetId)?.pins || pinsets[0]?.pins || [];
+  const setPinsOf = (p, pins) =>
+    setPinsets(pinsets.map((s) => (s.id === (p?.pinsetId || pinsets[0]?.id) ? { ...s, pins } : s)));
+  const updatePkg = (next) => setPkgs(pkgs.map((p, i) => (i === pkgIndex ? next : p)));
+  const sharedWith = pkg ? pkgs.filter((p) => p.pinsetId === pkg.pinsetId).map((p) => p.name) : [];
 
   const doGenerate = async () => {
+    const items = pkgs.filter((p) => p.include !== false).map((p) => ({ pkg: p, pins: pinsOf(p) }));
+    if (!items.length) { setError('至少勾选一个封装'); return; }
     setPhase('generating');
     setError('');
     try {
-      const result = await apiGenerate({ part, pkg, pins });
+      const result = await apiGenerate({ part, items });
       setGenResult(result);
       setPhase('confirm');
       setTimeout(() => document.getElementById('preview-anchor')?.scrollIntoView({ behavior: 'smooth' }), 100);
@@ -81,7 +93,8 @@ export default function App() {
     }
   };
 
-  const confirmed = { part, pkg, pins, figures };
+  const confirmed = { part, packages: pkgs, pinsets, figures };
+  const includeCount = pkgs.filter((p) => p.include !== false).length;
 
   return (
     <div className={`app ${embedded ? 'embedded' : ''}`}>
@@ -146,13 +159,31 @@ export default function App() {
 
           <section className="card">
             <div className="confirm-tabs">
-              {[['pins', `② 管脚表（${pins.length}）`], ['pkg', '③ 封装参数'], ['figs', `④ 图区截取（${figures.length}）`]].map(([k, label]) => (
+              {[['pins', `② 管脚表（${pinsOf(pkg).length}）`], ['pkg', `③ 封装（${includeCount}/${pkgs.length} 参与生成）`], ['figs', `④ 图区截取（${figures.length}）`]].map(([k, label]) => (
                 <button key={k} className={`fig-tab ${confirmTab === k ? 'active' : ''}`} onClick={() => setConfirmTab(k)}>{label}</button>
               ))}
             </div>
-            {confirmTab === 'pins' && <PinTable pins={pins} onChange={setPins} />}
+            {confirmTab === 'pins' && pkg && (
+              <>
+                {pinsets.length > 1 && (
+                  <p className="hint">
+                    当前编辑封装 <b>{pkg.name}</b> 的管脚定义集「{pkg.pinsetId}」
+                    {sharedWith.length > 1 && <>（与 {sharedWith.join(' / ')} 共享，修改同步生效）</>}
+                    ；切换封装请到 ③。
+                  </p>
+                )}
+                <PinTable pins={pinsOf(pkg)} onChange={(p) => setPinsOf(pkg, p)} />
+              </>
+            )}
             {confirmTab === 'pkg' && pkg && (
-              <PackageForm packages={extract.packages} selectedIndex={pkgIndex} pkg={pkg} onSelect={selectPackage} onChange={setPkg} />
+              <PackageForm
+                packages={pkgs}
+                selectedIndex={pkgIndex}
+                pkg={pkg}
+                pinsets={pinsets}
+                onSelect={setPkgIndex}
+                onChange={updatePkg}
+              />
             )}
             {confirmTab === 'figs' && (
               <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} />
@@ -161,7 +192,7 @@ export default function App() {
 
           <section className="card generate-card">
             <button className="btn-primary btn-big" disabled={phase === 'generating'} onClick={doGenerate}>
-              {phase === 'generating' ? '生成中…' : '✓ 确认无误，生成 KiCad 符号 / 封装 / 3D'}
+              {phase === 'generating' ? '生成中…' : `✓ 确认无误，生成 ${includeCount} 个封装的 KiCad 符号 / 封装 / 3D`}
             </button>
           </section>
 
@@ -170,11 +201,11 @@ export default function App() {
             <>
               <section className="card">
                 <h2>⑤ 在线预览（KiCad Part Viewer 内核）</h2>
-                <ViewerPanel files={genResult.files} />
+                <ViewerPanel bundle={genResult} />
               </section>
               <section className="card">
                 <h2>⑥ 导出</h2>
-                <ExportPanel result={genResult} confirmed={confirmed} pdfUrl={extract.pdfUrl} embedded={embedded} />
+                <ExportPanel bundle={genResult} confirmed={confirmed} pdfUrl={extract.pdfUrl} embedded={embedded} />
               </section>
             </>
           )}

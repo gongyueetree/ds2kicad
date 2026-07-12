@@ -37,7 +37,17 @@
 - Gemini 响应经 3 次重试（指数退避）+ `repairJSON()`，`maxOutputTokens=16384` 防截断。
 - `DETERMINISTIC_FIRST=0` 可关闭混合策略回到全量 AI（对照调试用）。
 
-## 二、封装生成引擎覆盖范围
+## 二、多封装与管脚定义集（pinset）— v0.3
+
+一份数据手册常提供多种封装（如 LM358 的 SOIC-8 / PDIP-8 / TSSOP-8 / VSSOP-8 / DSBGA），且部分封装的管脚定义不同（DSBGA 用球号 A1/B1…）。数据模型：
+
+- `pinsets: [{id, label, pins[]}]` — 每种**不同的管脚编号方案**一个集合；每个封装带 `pinsetId` 引用
+- **符号按 pinset 指纹去重**：管脚兼容的封装共享一个符号（`MPN`）；不同 pinset 生成符号变体（`MPN_<封装代号>`）。一个 `.kicad_sym` 库文件承载全部变体
+- **每个勾选的封装各自生成** `.kicad_mod` + `.wrl`（BGA/DSBGA 暂只出符号变体并给出 warning）
+- 提取端：多列管脚表（TI 格式 `NAME | D,P,PW | DSBGA | I/O | DESC`）程序化解析为多个 pinset，列头 token 与封装 tiCode 精确匹配完成归属；解析不了列头则降置信交 Gemini（其 schema 同为 pinsets）
+- `/api/generate` 双形状兼容：`{part, items:[{pkg,pins}]}` 批量（新）与 `{part, pkg, pins}` 单封装（旧）
+
+## 三、封装生成引擎覆盖范围
 
 | 家族 | 封装类型 | 算法要点 |
 |---|---|---|
@@ -48,7 +58,7 @@
 
 3D 模型为参数化 VRML 2.0（`.wrl`，KiCad 约定 1 单位 = 2.54mm）：环氧本体 + 1 脚标记 + 按家族生成引脚（鸥翼两段简化 / QFN 侧焊端 / DIP 直插柱），three.js `VRMLLoader` 在线预览与下载文件同源同构。
 
-## 三、本地开发
+## 四、本地开发
 
 ```bash
 npm install
@@ -60,7 +70,7 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
 
 > macOS 注意：项目目录（尤其 `node_modules`）**严禁放在 iCloud Drive 同步范围内**。
 
-## 四、部署到 Vercel
+## 五、部署到 Vercel
 
 1. 推送本仓库到 GitHub，Vercel 导入项目（框架自动识别为 Vite）。
 2. Environment Variables 中配置：
@@ -78,7 +88,7 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
 | Gemini inline 请求 20MB 上限 | PDF 下载上限默认 15MB（`MAX_PDF_MB`），超限返回 413 |
 | 函数无状态 | 无任何持久化；PDF 按次下载，前端 pdf.js 侧有文档缓存 |
 
-## 五、ezPLM 插件集成（预留协议）
+## 六、ezPLM 插件集成（预留协议）
 
 **嵌入方式**：iframe 加载 `https://<deployment>/?embed=1&pdf=<encodeURIComponent(datasheetUrl)>`
 
@@ -106,7 +116,7 @@ window.addEventListener('message', (e) => {
 
 **服务端复用**：`lib/kicadgen` 与 `lib/validate.js` 为零依赖纯 ESM 模块，ezPLM 后端可直接 import 复用，无需经 HTTP。
 
-## 六、目录结构
+## 七、目录结构
 
 ```
 api/            Vercel 函数：extract（Gemini 提取）、generate（确定性生成）、fetch-pdf（Edge PDF 代理）
@@ -119,7 +129,7 @@ server/dev.js   本地开发 API 宿主（不部署）
 test/           单元测试 + 端到端冒烟
 ```
 
-## 七、已知边界与后续路线
+## 八、已知边界与后续路线
 
 - **管脚↔物理位置映射**：封装引脚位置按编号 1..N 标准排布；若器件管脚编号非标准顺序（极少见），需在封装参数中人工核对。
 - **异形封装**（BGA / LGA / 非对称引脚）暂不支持，属 v0.2 范围；QFN 引脚数非 4 倍数时自动回退 dual 并给出 warning。

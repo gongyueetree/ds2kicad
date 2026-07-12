@@ -1,7 +1,7 @@
 // api/generate.js — 生成接口（Node Serverless Function）
 // POST { part, pkg, pins } → { files:{kicadSym,legacyLib,kicadMod,wrl}, names, warnings }
 // 纯确定性引擎，无任何 AI 参与；同一套 lib/kicadgen 未来可被 ezPLM 服务端直接复用。
-import { generateAll } from '../lib/kicadgen/index.js';
+import { generateAll, generateBundle } from '../lib/kicadgen/index.js';
 import { setCors } from './extract.js';
 
 export default async function handler(req, res) {
@@ -15,7 +15,8 @@ export default async function handler(req, res) {
   if (!body) return res.status(400).json({ error: '请求体不是有效 JSON' });
 
   try {
-    const result = generateAll(body);
+    // 新形状 { part, items:[{pkg,pins}] } → 多封装批量；旧形状 { part, pkg, pins } → 单封装
+    const result = Array.isArray(body.items) ? generateBundle(body) : generateAll(body);
     return res.status(200).json(result);
   } catch (e) {
     return res.status(422).json({ error: e.message });

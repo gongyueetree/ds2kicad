@@ -104,3 +104,5 @@ footer a { color: var(--brand); }
   .pkg-grid { grid-template-columns: repeat(2, 1fr); }
   .part-grid { grid-template-columns: 1fr; }
 }
+.pkg-include { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; color: var(--ink); }
+.pkg-include input { width: auto; }
