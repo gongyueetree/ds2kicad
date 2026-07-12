@@ -42,10 +42,13 @@ export default function App() {
   }, []);
 
   const doExtract = async (targetUrl, fileOverride) => {
-    const theFile = fileOverride || file;
-    const useFile = !targetUrl && theFile;
+    // 通道判定：仅当文件选择器显式传入 fileOverride 时走本地通道；
+    // 「开始提取」按钮/回车/postMessage 一律以 URL 输入框为准（并清除残留的文件芯片）
+    const theFile = fileOverride || null;
+    const useFile = !!theFile;
     const u = useFile ? `local:${theFile.name}` : (targetUrl || url).trim();
     if (!u) return;
+    if (!useFile && file) setFile(null); // URL 提取开始即清除文件芯片，避免来源混淆
     setPhase('extracting');
     setError('');
     setGenResult(null);
@@ -163,7 +166,9 @@ export default function App() {
           </label>
           {file && (
             <span className="src-badge src-parser">
-              {file.name}（{(file.size / 1048576).toFixed(2)}MB）
+              <button className="chip-link" title="重新提取此文件" onClick={() => doExtract(null, file)}>
+                {file.name}（{(file.size / 1048576).toFixed(2)}MB）
+              </button>
               <button className="btn-ghost" onClick={() => setFile(null)} title="清除">✕</button>
             </span>
           )}

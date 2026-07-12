@@ -137,3 +137,4 @@ footer a { color: var(--brand); }
 .upload-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
 .upload-btn { cursor: pointer; display: inline-block; }
 .upload-row .src-badge { display: inline-flex; align-items: center; gap: 4px; }
+.chip-link { background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; text-decoration: underline dotted; }
