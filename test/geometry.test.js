@@ -232,3 +232,29 @@ test('findFigures：中文首页"典型应用"位于图下方（下半页）→ 
   assert.ok(ap.bbox[1] < capNormY - 0.1, `bbox=${JSON.stringify(ap.bbox)}`);
   assert.ok(ap.bbox[3] >= capNormY - 0.05);
 });
+
+test('合并管脚行展开 + EP 别名归一化：ADL6346B 实测形态端到端', async () => {
+  const { sanitizePins, guessFamily } = await import('../lib/validate.js');
+  const { generateBundle } = await import('../lib/kicadgen/index.js');
+  const raw = [
+    { number: '1, 4, 9', name: 'GND', type: 'power_in' }, { number: '2', name: 'INP', type: 'input' },
+    { number: '3', name: 'INN', type: 'input' }, { number: '5', name: 'VCC1', type: 'power_in' },
+    { number: '6, 8', name: 'NIC', type: 'no_connect' }, { number: '7', name: 'VCC2', type: 'power_in' },
+    { number: '10', name: 'OUT', type: 'output' }, { number: '11, 12', name: 'GND', type: 'power_in' },
+    { number: '13', name: 'VCCBIAS', type: 'power_in' }, { number: '14', name: 'LIN2', type: 'input' },
+    { number: '15', name: 'MAIN2', type: 'input' }, { number: '16', name: 'ENP', type: 'input' },
+    { number: 'EPAD', name: 'EPAD', type: 'passive' }
+  ];
+  const pins = sanitizePins(raw);
+  assert.equal(pins.length, 17);
+  assert.deepEqual(pins.map((p) => p.number), Array.from({ length: 17 }, (_, i) => String(i + 1)));
+  // LFCSP → qfn，全链路生成不再拒绝
+  const pkg = { name: 'LFCSP-16', type: 'LFCSP', family: guessFamily('LFCSP'), pinCount: 16, pitch: 0.5, bodyLength: 3, bodyWidth: 3, leadLength: 0.4, height: 0.75, epLength: 1.6, epWidth: 1.6 };
+  const r = generateBundle({ part: { mpn: 'ADL6346B' }, items: [{ pkg, pins }] });
+  assert.ok(r.items[0].files.kicadMod && r.items[0].files.wrl, 'LFCSP 应生成封装与 3D');
+  assert.equal((r.items[0].files.kicadMod.match(/\(pad "/g) || []).length, 17);
+  // legacy 符号格式良构：每个 X 行第 3 字段为纯编号（无空格逗号），渲染器可解析
+  const xLines = r.symbols[0].legacyLib.split('\n').filter((l) => l.startsWith('X '));
+  assert.equal(xLines.length, 17);
+  for (const l of xLines) assert.match(l, /^X \S+ \d+ -?\d/, l);
+});
