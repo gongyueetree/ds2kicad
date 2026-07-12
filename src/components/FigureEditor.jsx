@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { loadPdf, renderPage, cropToDataUrl } from '../pdf.js';
 
-const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用示例' };
+const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用示例', pin_configuration: '管脚排布图' };
 
 function CropStage({ pageCanvas, bbox, onBbox }) {
   const wrapRef = useRef(null);
@@ -127,12 +127,21 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
     onChange(next);
   };
 
+  const confirmedCount = figures.filter((f) => f.confirmed).length;
+
   return (
     <div className="figure-editor">
+      <p className="hint">
+        已确认 <b>{confirmedCount}</b> / {figures.length} 张 — 只有「已确认」的图会进入 ZIP / part-bundle / ezPLM 发送。
+        {confirmedCount < figures.length && (
+          <button className="btn-ghost" style={{ marginLeft: 8 }}
+            onClick={() => onChange(figures.map((f) => ({ ...f, confirmed: true })))}>全部确认</button>
+        )}
+      </p>
       <div className="figure-tabs">
         {figures.map((f, i) => (
-          <button key={i} className={`fig-tab ${i === active ? 'active' : ''}`} onClick={() => setActive(i)}>
-            {KIND_LABEL[f.kind]} {figures.filter((x) => x.kind === f.kind).length > 1 ? `#${figures.slice(0, i + 1).filter((x) => x.kind === f.kind).length}` : ''}
+          <button key={i} className={`fig-tab ${i === active ? 'active' : ''} ${f.confirmed ? 'confirmed' : ''}`} onClick={() => setActive(i)}>
+            {f.confirmed ? '✓ ' : ''}{KIND_LABEL[f.kind]} {figures.filter((x) => x.kind === f.kind).length > 1 ? `#${figures.slice(0, i + 1).filter((x) => x.kind === f.kind).length}` : ''}
           </button>
         ))}
         <button className="btn-ghost" onClick={() => { onChange([...figures, { kind: 'application', title: 'Application Example', page: fig.page, bbox: [0.1, 0.1, 0.9, 0.5] }]); setActive(figures.length); }}>＋</button>
@@ -144,6 +153,7 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
         <label>类型
           <select value={fig.kind} onChange={(e) => updFig({ kind: e.target.value })}>
             <option value="block_diagram">内部功能框图</option>
+            <option value="pin_configuration">管脚排布图</option>
             <option value="application">应用示例</option>
           </select>
         </label>
@@ -167,7 +177,7 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
         <div className="figure-stage">
           <p className="hint">在页面上按住左键拖拽，重新框选图区{mock ? '（演示模式：AI 建议框为占位值，请自行框选）' : ''}：</p>
           {pageCanvas
-            ? <CropStage pageCanvas={pageCanvas} bbox={fig.bbox} onBbox={(bbox) => updFig({ bbox })} />
+            ? <CropStage pageCanvas={pageCanvas} bbox={fig.bbox} onBbox={(bbox) => updFig({ bbox, confirmed: false })} />
             : <div className="stage-empty">等待页面渲染…</div>}
         </div>
         <div className="figure-preview">
@@ -175,6 +185,11 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
           {previews[active]
             ? <img src={previews[active]} alt={fig.title} />
             : <div className="stage-empty">—</div>}
+          <div style={{ marginTop: 10 }}>
+            {fig.confirmed
+              ? <button className="btn-secondary" onClick={() => updFig({ confirmed: false })}>✓ 已确认（点击取消）</button>
+              : <button className="btn-primary" onClick={() => updFig({ confirmed: true })}>确认此图（按当前框选截取）</button>}
+          </div>
         </div>
       </div>
     </div>

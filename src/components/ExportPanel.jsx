@@ -17,6 +17,7 @@ const dataUrlToBlob = (dataUrl) => fetch(dataUrl).then((r) => r.blob());
 export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded }) {
   const [busy, setBusy] = useState('');
   if (!bundle) return null;
+  const okFigs = confirmed.figures.filter((f) => f.confirmed);
 
   const buildBundleJson = (figuresWithImages) => JSON.stringify({
     schema: 'ds2kicad.part-bundle.v2',
@@ -27,7 +28,7 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded }) {
     packages: confirmed.packages.map((p) => ({ ...p })),
     symbols: bundle.symbols.map((s) => ({ name: s.name, packages: s.packages })),
     items: bundle.items.map((it) => ({ pkgName: it.pkgName, symbolName: it.symbolName, files: it.names })),
-    figures: (figuresWithImages || confirmed.figures).map((f) => ({
+    figures: (figuresWithImages || okFigs).map((f) => ({
       kind: f.kind, title: f.title, page: f.page, bbox: f.bbox,
       ...(f.dataUrl ? { pngDataUrl: f.dataUrl } : {})
     })),
@@ -46,7 +47,7 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded }) {
         if (it.files.wrl) zip.file(it.names.wrl, it.files.wrl);
       }
       try {
-        const figs = await exportFigures(pdfUrl, confirmed.figures);
+        const figs = await exportFigures(pdfUrl, okFigs);
         for (let i = 0; i < figs.length; i++) {
           const f = figs[i];
           const blob = await dataUrlToBlob(f.dataUrl);
@@ -67,8 +68,8 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded }) {
   const sendToEzplm = async () => {
     setBusy('正在生成 Part Bundle…');
     try {
-      let figs = confirmed.figures;
-      try { figs = await exportFigures(pdfUrl, confirmed.figures); } catch { /* 无图也发送 */ }
+      let figs = okFigs;
+      try { figs = await exportFigures(pdfUrl, okFigs); } catch { /* 无图也发送 */ }
       const payload = {
         type: 'ezplm:ds2kicad:result',
         version: 2,
@@ -104,6 +105,7 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded }) {
         <button className="btn-primary" onClick={exportZip}>📦 打包下载 ZIP（全部封装 + 截图 PNG）</button>
         {embedded && <button className="btn-primary" onClick={sendToEzplm}>↗ 发送到 ezPLM（postMessage）</button>}
       </div>
+      <p className="hint">图区：已确认 {okFigs.length} / {confirmed.figures.length} 张将随导出打包{okFigs.length < confirmed.figures.length ? '（未确认的不导出，请回 ④ 确认）' : ''}</p>
       {busy && <p className="status-line">{busy}</p>}
       {bundle.warnings?.length > 0 && (
         <div className="warn-box">

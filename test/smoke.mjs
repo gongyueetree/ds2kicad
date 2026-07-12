@@ -31,7 +31,7 @@ try {
   check('extract mock 标记', ex.data.mock === true);
   check('extract 管脚 25 项（含 EP）', ex.data.pins?.length === 25, `实际 ${ex.data.pins?.length}`);
   check('extract 封装候选含 family', ex.data.packages?.[0]?.family === 'qfn');
-  check('extract 图区 2 项', ex.data.figures?.length === 2);
+  check('extract 图区 4 项（框图1+管脚排布2+应用1）', ex.data.figures?.length === 4 && ex.data.figures.filter((f) => f.kind === 'pin_configuration').length === 2);
   check('extract pinsets 2 集（WQFN 含 EP / TSSOP 无）', ex.data.pinsets?.length === 2 && ex.data.pinsets[1].pins.length === 24);
   check('extract 封装带 pinsetId', ex.data.packages?.every((p) => !!p.pinsetId));
 

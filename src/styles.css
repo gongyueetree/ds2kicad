@@ -106,3 +106,4 @@ footer a { color: var(--brand); }
 }
 .pkg-include { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; color: var(--ink); }
 .pkg-include input { width: auto; }
+.fig-tab.confirmed { border-color: #0b6e63; }

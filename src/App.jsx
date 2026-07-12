@@ -159,7 +159,7 @@ export default function App() {
 
           <section className="card">
             <div className="confirm-tabs">
-              {[['pins', `② 管脚表（${pinsOf(pkg).length}）`], ['pkg', `③ 封装（${includeCount}/${pkgs.length} 参与生成）`], ['figs', `④ 图区截取（${figures.length}）`]].map(([k, label]) => (
+              {[['pins', `② 管脚表（${pinsOf(pkg).length}）`], ['pkg', `③ 封装（${includeCount}/${pkgs.length} 参与生成）`], ['figs', `④ 图区截取（${figures.filter((f) => f.confirmed).length}/${figures.length} 已确认）`]].map(([k, label]) => (
                 <button key={k} className={`fig-tab ${confirmTab === k ? 'active' : ''}`} onClick={() => setConfirmTab(k)}>{label}</button>
               ))}
             </div>
