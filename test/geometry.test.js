@@ -294,3 +294,33 @@ test('SC70-5 pitch 垃圾值（0.2mm）→ 先验 0.65mm；6 脚 SOT-23-6 仍为
   const p3 = sanitizePackage({ name: 'SOT-23', type: 'SOT-23', pinCount: 3 });
   assert.equal(p3.family, 'sot23');
 });
+
+test('NSM2011 实测形态：IP± 电流路径入左出右，顶部仅正电源，NC 沉右列底部', async () => {
+  const { generateKicadSym, generateLegacyLib } = await import('../lib/kicadgen/symbol.js');
+  const pins = [
+    { number: '1', name: 'IP+_1', type: 'power_in' }, { number: '2', name: 'IP+_2', type: 'power_in' },
+    { number: '3', name: 'IP+_3', type: 'power_in' }, { number: '4', name: 'IP+_4', type: 'power_in' },
+    { number: '5', name: 'IP-_1', type: 'power_out' }, { number: '6', name: 'IP-_2', type: 'power_out' },
+    { number: '7', name: 'IP-_3', type: 'power_out' }, { number: '8', name: 'IP-_4', type: 'power_out' },
+    { number: '9', name: 'NC_1', type: 'no_connect' }, { number: '10', name: 'VCC', type: 'power_in' },
+    { number: '11', name: 'NC_2', type: 'no_connect' }, { number: '12', name: 'VOUT', type: 'output' },
+    { number: '13', name: 'FILT', type: 'passive' }, { number: '14', name: 'NC_3', type: 'no_connect' },
+    { number: '15', name: 'GND', type: 'power_in' }, { number: '16', name: 'NC_4', type: 'no_connect' }
+  ];
+  const leg = generateLegacyLib({ mpn: 'NSM2011', pins });
+  const rows = leg.split('\n').filter((l) => l.startsWith('X ')).map((l) => l.split(/\s+/));
+  const dir = Object.fromEntries(rows.map((r) => [r[1], r[6]]));
+  // 入左（R）出右（L）
+  for (const n of ['IP+_1', 'IP+_2', 'IP+_3', 'IP+_4']) assert.equal(dir[n], 'R', `${n} 应在左`);
+  for (const n of ['IP-_1', 'IP-_4', 'VOUT']) assert.equal(dir[n], 'L', `${n} 应在右`);
+  assert.equal(dir['VCC'], 'D', 'VCC 顶部');
+  assert.equal(dir['GND'], 'U', 'GND 底部');
+  // 顶部只有 VCC 一个
+  assert.equal(rows.filter((r) => r[6] === 'D').length, 1);
+  // NC 沉底：右列（L 向）中 NC 的 y 均低于 VOUT
+  const yOf = Object.fromEntries(rows.filter((r) => r[6] === 'L').map((r) => [r[1], +r[4]]));
+  for (const nc of ['NC_1', 'NC_2', 'NC_3', 'NC_4']) assert.ok(yOf[nc] < yOf['VOUT'], `${nc} 应在 VOUT 之下`);
+  // kicad_sym 同构
+  const sym = generateKicadSym({ mpn: 'NSM2011', footprintName: 'X', pins });
+  assert.ok(sym.includes('"IP+_1"'));
+});
