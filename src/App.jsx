@@ -113,7 +113,22 @@ export default function App() {
           <p className="mock-badge">MOCK 演示数据 — {extract.meta?.reason}，管脚与尺寸为演示占位，配置 GEMINI_API_KEY 后为真实提取</p>
         )}
         {extract && !extract.mock && (
-          <p className="hint">已提取 {part?.mpn}（{extract.meta?.model} · PDF {Math.round((extract.meta?.pdfBytes || 0) / 1024)} KB）</p>
+          <p className="hint">
+            已提取 {part?.mpn}
+            {extract.meta?.mode === 'degraded'
+              ? ` — ${extract.meta.warning}`
+              : `（${extract.meta?.model} · PDF ${Math.round((extract.meta?.pdfBytes || 0) / 1024)} KB）`}
+          </p>
+        )}
+        {extract?.sources && (
+          <p className="source-line">
+            来源：
+            {[['管脚表', 'pins'], ['封装尺寸', 'packages'], ['图区定位', 'figures'], ['器件信息', 'part']].map(([label, k]) => (
+              <span key={k} className={`src-badge src-${extract.sources[k]}`}>
+                {label} · {{ parser: '程序解析', gemini: 'AI 提取', fallback: '默认值' }[extract.sources[k]] || extract.sources[k]}
+              </span>
+            ))}
+          </p>
         )}
       </section>
 

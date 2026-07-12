@@ -47,32 +47,114 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: `数据手册下载失败: ${e.message}` });
   }
 
+  // ── 阶段 1：确定性程序化解析（零 AI 成本）──────────────────────────────
+  // AI 只在程序化拿不到时按需介入；每个字段带来源溯源（parser / gemini）。
+  let det = { textOk: false, part: null, pins: [], pinConfidence: 'low', figures: [], relevantPages: [] };
+  if (process.env.DETERMINISTIC_FIRST !== '0') {
+    try {
+      const { extractTextPages } = await import('../lib/pdftext.js');
+      const { findPartInfo, parsePinTable, findFigures, selectRelevantPages } = await import('../lib/heuristics.js');
+      const { pages } = await extractTextPages(pdfBuf);
+      const totalText = pages.reduce((n, p) => n + p.lines.length, 0);
+      if (totalText > 20) { // 有文本层（非纯扫描版）
+        const pi = findPartInfo(pages, v.url);
+        const pt = parsePinTable(pages);
+        const figs = findFigures(pages);
+        det = {
+          textOk: true,
+          part: pi.ok ? pi.part : null,
+          pins: pt.pins,
+          pinConfidence: pt.confidence,
+          figures: figs,
+          relevantPages: selectRelevantPages(pages, figs)
+        };
+      }
+    } catch (e) {
+      console.error('程序化解析失败，回退全量 AI:', e.message);
+    }
+  }
+
+  // ── 阶段 2：按需 Gemini（封装机械尺寸通常必须 AI 读图；其余能省则省）────
+  const need = {
+    part: !det.part,
+    packages: true,
+    pins: det.pinConfidence !== 'high',
+    figures: det.figures.length === 0
+  };
+
   try {
+    // 相关页切片：只喂首页+管脚页+机械图页+图区页，token/时延双降；失败回退整本
+    let geminiBuf = pdfBuf, sliced = false;
+    if (det.relevantPages.length) {
+      const { slicePdf } = await import('../lib/pdfslice.js');
+      const s = await slicePdf(pdfBuf, det.relevantPages);
+      if (s) { geminiBuf = s.buf; sliced = true; }
+    }
     const raw = await extractWithGemini({
-      pdfBase64: pdfBuf.toString('base64'),
+      pdfBase64: geminiBuf.toString('base64'),
       apiKey,
       model: process.env.GEMINI_MODEL,
-      sourceUrl: v.url
+      sourceUrl: v.url,
+      need,
+      hints: {
+        mpn: det.part?.mpn,
+        pinCount: need.pins ? undefined : det.pins.length,
+        note: sliced ? 'The attached PDF contains only the relevant pages (first page, pin table, mechanical drawings) sliced from the full datasheet.' : undefined
+      }
     });
+
     const packages = (Array.isArray(raw?.packages) ? raw.packages : [])
       .map((p) => ({ ...sanitizePackage(p), family: guessFamily(p?.type || p?.name) }));
     if (!packages.length) packages.push(sanitizePackage({}));
     const idx = Math.min(Math.max(0, Math.round(Number(raw?.recommendedPackageIndex) || 0)), packages.length - 1);
+
+    const part = need.part
+      ? {
+          mpn: String(raw?.part?.mpn || '').trim() || det.part?.mpn || 'UNKNOWN',
+          manufacturer: String(raw?.part?.manufacturer || '').trim(),
+          title: String(raw?.part?.title || '').trim(),
+          description_zh: String(raw?.part?.description_zh || '').trim()
+        }
+      : det.part;
+    const pins = need.pins ? sanitizePins(raw?.pins) : sanitizePins(det.pins);
+    const figures = need.figures ? sanitizeFigures(raw?.figures) : sanitizeFigures(det.figures);
+
     return res.status(200).json({
       mock: false,
-      part: {
-        mpn: String(raw?.part?.mpn || '').trim() || 'UNKNOWN',
-        manufacturer: String(raw?.part?.manufacturer || '').trim(),
-        title: String(raw?.part?.title || '').trim(),
-        description_zh: String(raw?.part?.description_zh || '').trim()
-      },
+      part,
       packages,
       recommendedPackageIndex: idx,
-      pins: sanitizePins(raw?.pins),
-      figures: sanitizeFigures(raw?.figures),
-      meta: { mode: 'live', model: process.env.GEMINI_MODEL || 'gemini-2.5-flash', pdfUrl: v.url, pdfBytes: pdfBuf.length }
+      pins,
+      figures,
+      sources: {
+        part: need.part ? 'gemini' : 'parser',
+        packages: 'gemini',
+        pins: need.pins ? 'gemini' : 'parser',
+        figures: need.figures ? 'gemini' : 'parser'
+      },
+      meta: {
+        mode: 'live',
+        model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+        pdfUrl: v.url,
+        pdfBytes: pdfBuf.length,
+        strategy: det.textOk ? (need.pins ? 'hybrid' : 'parser-first') : 'gemini-full',
+        pinConfidence: det.pinConfidence
+      }
     });
   } catch (e) {
+    // Gemini 整体失败：若程序化已拿到管脚高置信结果，降级返回（封装参数留给用户手填）
+    if (det.pinConfidence === 'high') {
+      return res.status(200).json({
+        mock: false,
+        part: det.part || { mpn: 'UNKNOWN', manufacturer: '', title: '', description_zh: '' },
+        packages: [sanitizePackage({ pinCount: det.pins.length })],
+        recommendedPackageIndex: 0,
+        pins: sanitizePins(det.pins),
+        figures: sanitizeFigures(det.figures),
+        sources: { part: 'parser', packages: 'fallback', pins: 'parser', figures: 'parser' },
+        meta: { mode: 'degraded', warning: `AI 不可用（${e.message}），封装尺寸为默认值，请手工核对`, pdfUrl: v.url, pdfBytes: pdfBuf.length }
+      });
+    }
     return res.status(502).json({ error: `AI 提取失败: ${e.message}` });
   }
 }
