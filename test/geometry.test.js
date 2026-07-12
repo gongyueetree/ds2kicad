@@ -258,3 +258,39 @@ test('合并管脚行展开 + EP 别名归一化：ADL6346B 实测形态端到�
   assert.equal(xLines.length, 17);
   for (const l of xLines) assert.match(l, /^X \S+ \d+ -?\d/, l);
 });
+
+test('MCP6486 实测形态：SOT-23-5 家族纠正 + JEDEC 先验 + 5 脚稀疏右列', async () => {
+  const { sanitizePackage } = await import('../lib/validate.js');
+  // AI 垃圾输入（截图中的 0.5x0.5mm 本体）
+  const pkg = sanitizePackage({ name: 'SOT-23-5', type: 'SOT-23-5', pinCount: 5, pitch: 0.95, bodyLength: 0.5, bodyWidth: 0.5, leadSpan: 0.5, height: 0.5 });
+  assert.equal(pkg.family, 'dual', 'SOT-23-5 应为 dual 而非 3 脚 sot23');
+  const w = [];
+  const g = normalizeGeometry(pkg, w);
+  assert.equal(g.pitch, 0.95);
+  assert.equal(g.bodyLength, 2.9);
+  assert.equal(g.bodyWidth, 1.6);
+  assert.equal(g.leadSpan, 2.8);
+  assert.ok(w.some((x) => /JEDEC/.test(x)));
+  // 5 脚布局：pin4 与 pin3 同底行、pin5 与 pin1 同顶行、右列中位无焊盘
+  const mod = generateFootprint({ mpn: 'MCP6486', pkg: g });
+  const pads = [...mod.matchAll(/\(pad "(\d)" smd \S+ \(at ([-\d.]+) ([-\d.]+)\)/g)].map((m) => ({ n: +m[1], x: +m[2], y: +m[3] }));
+  assert.equal(pads.length, 5);
+  const by = Object.fromEntries(pads.map((p) => [p.n, p]));
+  assert.ok(by[1].x < 0 && by[5].x > 0 && Math.abs(by[5].y - by[1].y) < 1e-6, 'pin5 对 pin1');
+  assert.ok(by[3].x < 0 && by[4].x > 0 && Math.abs(by[4].y - by[3].y) < 1e-6, 'pin4 对 pin3');
+  assert.ok(!pads.some((p) => p.x > 0 && Math.abs(p.y) < 1e-6), '右列中位应空');
+});
+
+test('SC70-5 pitch 垃圾值（0.2mm）→ 先验 0.65mm；6 脚 SOT-23-6 仍为满排', async () => {
+  const { sanitizePackage } = await import('../lib/validate.js');
+  const w = [];
+  const g = normalizeGeometry(sanitizePackage({ name: 'SC70-5', type: 'SC70-5', pinCount: 5, pitch: 0.2, bodyLength: 0.5, bodyWidth: 0.5, leadSpan: 0.5, height: 0.5 }), w);
+  assert.equal(g.pitch, 0.65);
+  assert.equal(g.bodyLength, 2.0);
+  const g6 = normalizeGeometry(sanitizePackage({ name: 'SOT-23-6', type: 'SOT-23-6', pinCount: 6, pitch: 0.95, bodyLength: 2.9, bodyWidth: 1.6, leadSpan: 2.8, height: 1.45 }), []);
+  const mod6 = generateFootprint({ mpn: 'X', pkg: g6 });
+  assert.equal((mod6.match(/\(pad "/g) || []).length, 6);
+  // 3 脚 SOT-23 仍走 sot23 专用生成器
+  const p3 = sanitizePackage({ name: 'SOT-23', type: 'SOT-23', pinCount: 3 });
+  assert.equal(p3.family, 'sot23');
+});
