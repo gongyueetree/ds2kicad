@@ -6,6 +6,7 @@ import PackageForm from './components/PackageForm.jsx';
 import FigureEditor from './components/FigureEditor.jsx';
 import ViewerPanel from './components/ViewerPanel.jsx';
 import ExportPanel from './components/ExportPanel.jsx';
+import FigureGallery from './components/FigureGallery.jsx';
 
 const DEMO_URL = 'https://www.ti.com.cn/cn/lit/ds/symlink/tmuxl27518.pdf';
 
@@ -193,6 +194,13 @@ export default function App() {
               <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} />
             )}
           </section>
+
+          {figures.length > 0 && (
+            <section className="card">
+              <h2>截取图集 <span className="sub-hint">随 ④ 的框选与确认实时更新，标注含类型/页码/标题</span></h2>
+              <FigureGallery pdfUrl={extract.pdfUrl} figures={figures} />
+            </section>
+          )}
 
           <section className="card generate-card">
             <button className="btn-primary btn-big" disabled={phase === 'generating'} onClick={doGenerate}>

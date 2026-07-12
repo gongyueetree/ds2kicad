@@ -63,12 +63,18 @@ export function renderLegacySymbol(txt, svg, selectedUnit = 1) {
       let x2 = x, y2 = y;
       if (ori === 'R') x2 += len; if (ori === 'L') x2 -= len;
       if (ori === 'U') y2 += len; if (ori === 'D') y2 -= len;
-      g.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: '#a40000', 'stroke-width': 8 / scale * 0.9 }));
-      g.appendChild(el('circle', { cx: x, cy: y, r: 11, fill: 'none', stroke: '#a40000', 'stroke-width': 3 / scale * 0.9 }));
+      const pinG = el('g', { 'data-pin': num, class: 'hit-pin' });
+      g.appendChild(pinG);
+      // 加宽的透明命中区，便于点击细线
+      pinG.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: 'transparent', 'stroke-width': 40 / scale }));
+      pinG.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: '#a40000', 'stroke-width': 8 / scale * 0.9, class: 'pin-stroke' }));
+      pinG.appendChild(el('circle', { cx: x, cy: y, r: 11, fill: 'none', stroke: '#a40000', 'stroke-width': 3 / scale * 0.9, class: 'pin-stroke' }));
 
       const outer = toScreen(x, y), inner = toScreen(x2, y2);
       const dx = inner.x - outer.x, dy = inner.y - outer.y, dist = Math.hypot(dx, dy) || 1;
       const ux = dx / dist, uy = dy / dist;
+      const pinTextG = el('g', { 'data-pin': num, class: 'hit-pin' });
+      textLayer.appendChild(pinTextG);
       const mkText = (text, pos, size, { anchor = 'middle', rotation = 0, color = '#006b68', weight = '500' } = {}) => {
         const t = el('text', {
           x: pos.x, y: pos.y,
@@ -78,7 +84,7 @@ export function renderLegacySymbol(txt, svg, selectedUnit = 1) {
           'paint-order': 'stroke', stroke: '#ffffff', 'stroke-width': '2.5', 'stroke-linejoin': 'round'
         });
         t.textContent = text;
-        textLayer.appendChild(t);
+        pinTextG.appendChild(t);
       };
       const isVertical = ori === 'U' || ori === 'D';
       const nameAt = { x: inner.x + ux * (isVertical ? 42 : 14), y: inner.y + uy * (isVertical ? 42 : 14) };

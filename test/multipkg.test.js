@@ -116,3 +116,19 @@ test('generateBundle：mock 双封装（WQFN 含 EP / TSSOP 无 EP）→ 两个�
   assert.equal(r.items.length, 2);
   assert.ok(r.items.every((it) => it.files.kicadMod && it.files.wrl));
 });
+
+test('联动高亮前提：符号 legacy 与封装 mod 均含可对应的管脚标识；bundle.symbols 携带 pins', () => {
+  const m = MOCK_TMUXL27518;
+  const sets = Object.fromEntries(m.pinsets.map((s) => [s.id, s.pins]));
+  const r = generateBundle({
+    part: m.part,
+    items: m.packages.map((p) => ({ pkg: { ...p, family: p.tiCode === 'PW' ? 'dual' : 'qfn' }, pins: sets[p.pinsetId] }))
+  });
+  // symbols 携带 pins（供联动信息条显示名称/类型）
+  assert.ok(r.symbols[0].pins?.length === 25);
+  // 同一管脚编号在 legacy 符号与 .kicad_mod 中都存在 → data-pin 可一一对应
+  for (const num of ['1', '13', '25']) {
+    assert.match(r.symbols[0].legacyLib, new RegExp(`^X \\S+ ${num} `, 'm'));
+    assert.ok(r.items[0].files.kicadMod.includes(`(pad "${num}"`));
+  }
+});

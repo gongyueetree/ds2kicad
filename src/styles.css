@@ -110,3 +110,26 @@ footer a { color: var(--brand); }
 .pkg-evidence { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .lp-details { margin: 8px 0 12px; }
 .lp-details summary { cursor: pointer; }
+
+/* 三栏并排预览 + 管脚联动高亮 */
+.viewer-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.viewer-cell h4 { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
+.viewer-grid .svg-stage svg { height: 380px; }
+.viewer-grid .model3d-host { height: 380px; }
+.pin-info-line { min-height: 20px; }
+.hit-pin { cursor: pointer; }
+.hit-pin.pin-active .pin-stroke { stroke: #d61f7f; }
+.hit-pin.pin-active .pad-shape { fill: #d61f7f; stroke: #8a1253; }
+.hit-pin.pin-active text { fill: #d61f7f; font-weight: 800; }
+.source-details { margin-top: 12px; }
+.source-details summary { cursor: pointer; }
+.source-details .source-grid { margin-top: 10px; }
+/* 图集 */
+.sub-hint { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+.fig-gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.fig-card { margin: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #fff; }
+.fig-card.confirmed { border-color: #0b6e63; }
+.fig-card img { display: block; width: 100%; background: #fff; }
+.fig-card figcaption { padding: 8px 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.fig-title { width: 100%; font-size: 12px; color: var(--ink); margin-top: 4px; }
+@media (max-width: 1000px) { .viewer-grid { grid-template-columns: 1fr; } }

@@ -80,7 +80,7 @@ export function renderFootprint(txt, svg) {
     g.appendChild(e2);
   });
   pads.forEach((p) => {
-    const pg = el('g', { transform: `translate(${p.x} ${p.y}) rotate(${p.rot})` });
+    const pg = el('g', { transform: `translate(${p.x} ${p.y}) rotate(${p.rot})`, 'data-pin': p.num, class: 'hit-pin' });
     g.appendChild(pg);
     const round = p.shape === 'circle' || p.shape === 'oval';
     const attrs = round
@@ -90,6 +90,7 @@ export function renderFootprint(txt, svg) {
     r.setAttribute('fill', p.num === '1' ? '#d77b31' : '#d69f36');
     r.setAttribute('stroke', '#8c6419');
     r.setAttribute('stroke-width', '.04');
+    r.setAttribute('class', 'pad-shape');
     pg.appendChild(r);
     const t = el('text', {
       x: 0, y: 0, transform: `rotate(${-p.rot})`, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
