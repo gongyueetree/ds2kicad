@@ -79,3 +79,40 @@ test('findFigures：识别 "(Top View)" 说明行为 pin_configuration；章节�
   assert.match(pc[0].title, /SOIC/);
   assert.ok(!figs.some((f) => /Pin Configuration and Functions/.test(f.title)), '章节标题不应成图');
 });
+
+test('landPattern：优先采用数据手册推荐焊盘（SOIC-8 实测值）', () => {
+  const pkg = {
+    name: 'SOIC-8', family: 'dual', pinCount: 8, pitch: 1.27,
+    bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6.0, height: 1.75,
+    landPattern: { padW: 0.6, padL: 1.55, rowSpan: 5.4, sourcePage: 63 }
+  };
+  const mod = generateFootprint({ mpn: 'LM358', pkg });
+  const m = /\(pad "2" smd \S+ \(at ([-\d.]+) [-\d.]+\) \(size ([\d.]+) ([\d.]+)\)/.exec(mod);
+  assert.ok(m, mod.slice(0, 400));
+  // rowSpan=内沿间距 5.4 → 焊盘中心 |x| = 5.4/2 + padL/2 = 3.475
+  assert.equal(Math.abs(+m[1]), 3.475);
+  assert.equal(+m[2], 1.55); // padL（垂直排布方向）
+  assert.equal(+m[3], 0.6);  // padW
+  assert.match(mod, /land pattern per datasheet p\.63/);
+});
+
+test('landPattern 自相矛盾 → 弃用回退派生 + 告警', () => {
+  const w = [];
+  const p = normalizeGeometry({
+    name: 'X', family: 'dual', pinCount: 8, pitch: 1.27,
+    bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6.0, height: 1.5,
+    landPattern: { padW: 1.5, padL: 1.5, rowSpan: 5.4 } // padW ≥ pitch → 相邻短路
+  }, w);
+  assert.equal(p.landPattern, null);
+  assert.ok(w.some((x) => /land pattern/.test(x)));
+});
+
+test('DIP landPattern：孔径/焊盘径采用推荐值', () => {
+  const pkg = {
+    name: 'PDIP-8', family: 'dip', pinCount: 8, pitch: 2.54,
+    bodyLength: 9.81, bodyWidth: 6.35, rowSpan: 7.62, height: 5.08,
+    landPattern: { padW: 1.6, padL: 1.6, rowSpan: 7.62, holeDia: 0.9 }
+  };
+  const mod = generateFootprint({ mpn: 'LM358', pkg });
+  assert.match(mod, /\(pad "1" thru_hole rect \(at -3\.81 [-\d.]+\) \(size 1\.6 1\.6\) \(drill 0\.9\)/);
+});

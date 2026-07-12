@@ -44,6 +44,10 @@ export default function App() {
     setPhase('extracting');
     setError('');
     setGenResult(null);
+    setExtract(null); // 清空上次结果，避免报错时残留误导
+    setPkgs([]);
+    setPinsets([]);
+    setFigures([]);
     try {
       const data = await apiExtract(u);
       // pinsets 兼容：老响应无 pinsets 时由 pins 合成单一集

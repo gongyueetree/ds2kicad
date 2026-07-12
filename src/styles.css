@@ -107,3 +107,6 @@ footer a { color: var(--brand); }
 .pkg-include { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; color: var(--ink); }
 .pkg-include input { width: auto; }
 .fig-tab.confirmed { border-color: #0b6e63; }
+.pkg-evidence { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.lp-details { margin: 8px 0 12px; }
+.lp-details summary { cursor: pointer; }

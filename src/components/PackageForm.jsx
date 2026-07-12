@@ -17,6 +17,12 @@ const FIELDS = [
   ['rowSpan', '孔距（DIP）', 'mm']
 ];
 
+const setLp = (pkg, onChange, k, v) => {
+  const lp = { padW: 0.6, padL: 1.5, rowSpan: 5.4, ...(pkg.landPattern || {}) };
+  lp[k] = Number(v) || 0;
+  onChange({ ...pkg, landPattern: lp });
+};
+
 export default function PackageForm({ packages, selectedIndex, pkg, pinsets = [], onSelect, onChange }) {
   const upd = (key, raw) => {
     const value = raw === '' ? null : Number(raw);
@@ -42,6 +48,31 @@ export default function PackageForm({ packages, selectedIndex, pkg, pinsets = []
         />
         将此封装包含在生成中（每个勾选的封装各生成一套 .kicad_mod + .wrl）
       </label>
+      {(pkg.drawingId || pkg.orderableParts?.length > 0 || pkg.sourcePages?.length > 0) && (
+        <p className="hint pkg-evidence">
+          {pkg.drawingId && <span className="src-badge src-parser">机械图 {pkg.drawingId}</span>}
+          {pkg.sourcePages?.length > 0 && <span className="src-badge src-parser">来源页 p.{pkg.sourcePages.join('/')}</span>}
+          {pkg.landPattern
+            ? <span className="src-badge src-parser">推荐焊盘{pkg.landPattern.sourcePage ? ` p.${pkg.landPattern.sourcePage}` : ''}</span>
+            : <span className="src-badge src-fallback">焊盘按规则派生</span>}
+          {pkg.orderableParts?.length > 0 && <span>可订购：{pkg.orderableParts.join(' / ')}</span>}
+        </p>
+      )}
+      {pkg.notes?.length > 0 && pkg.notes.map((n, i) => <p key={i} className="hint">⚠ {n}</p>)}
+      <details className="lp-details">
+        <summary className="hint">推荐 land pattern（数据手册值优先于派生；留空回退派生）</summary>
+        <div className="pkg-grid" style={{ marginTop: 8 }}>
+          <label>焊盘宽 padW<span className="unit">mm</span>
+            <input type="number" step="0.05" value={pkg.landPattern?.padW ?? ''} onChange={(e) => setLp(pkg, onChange, 'padW', e.target.value)} /></label>
+          <label>焊盘长 padL<span className="unit">mm</span>
+            <input type="number" step="0.05" value={pkg.landPattern?.padL ?? ''} onChange={(e) => setLp(pkg, onChange, 'padL', e.target.value)} /></label>
+          <label>行距 rowSpan<span className="unit">mm</span>
+            <input type="number" step="0.05" value={pkg.landPattern?.rowSpan ?? ''} onChange={(e) => setLp(pkg, onChange, 'rowSpan', e.target.value)} /></label>
+          <label>孔径 holeDia<span className="unit">mm</span>
+            <input type="number" step="0.05" value={pkg.landPattern?.holeDia ?? ''} onChange={(e) => setLp(pkg, onChange, 'holeDia', e.target.value)} /></label>
+        </div>
+        {pkg.landPattern && <button className="btn-ghost" onClick={() => onChange({ ...pkg, landPattern: null })}>清除，回退派生焊盘</button>}
+      </details>
       {pinsets.length > 1 && (
         <label className="pkg-select">
           管脚定义集（pinset）：
