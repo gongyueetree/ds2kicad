@@ -153,9 +153,10 @@ export default async function handler(req, res) {
       : det.part;
     const recSet = pinsets.find((s2) => s2.id === packages[idx].pinsetId) || pinsets[0];
     const pins = recSet ? recSet.pins : [];
-    const figures = capFigures(
+    const { filterFigures } = await import('../lib/figfilter.js');
+    const figures = filterFigures(
       need.figures ? sanitizeFigures(raw?.figures) : sanitizeFigures(det.figures),
-      packages.length
+      { pkgCount: packages.length }
     );
 
     return res.status(200).json({
@@ -191,7 +192,7 @@ export default async function handler(req, res) {
         recommendedPackageIndex: 0,
         pins: sanitizePins(det.pins),
         pinsets: sanitizePinsets(det.pinsets, det.pins),
-        figures: sanitizeFigures(det.figures),
+        figures: (await import('../lib/figfilter.js')).filterFigures(sanitizeFigures(det.figures), { pkgCount: 1 }),
         sources: { part: 'parser', packages: 'fallback', pins: 'parser', figures: 'parser' },
         meta: { mode: 'degraded', warning: `AI 不可用（${e.message}），封装尺寸为默认值，请手工核对`, pdfUrl: v.url, pdfBytes: pdfBuf.length }
       });
@@ -202,13 +203,7 @@ export default async function handler(req, res) {
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
 
-/** 图区数量策略：功能框图 1 张；管脚排布图随封装数量（每封装一张）；应用示例最多 3 张 */
-function capFigures(figs, pkgCount) {
-  const block = figs.filter((f) => f.kind === 'block_diagram').slice(0, 1);
-  const pincfg = figs.filter((f) => f.kind === 'pin_configuration').slice(0, Math.max(1, pkgCount));
-  const apps = figs.filter((f) => f.kind === 'application').slice(0, 3);
-  return [...block, ...pincfg, ...apps];
-}
+
 
 export function setCors(res, req) {
   const allowed = (process.env.ALLOWED_ORIGINS || '')

@@ -116,3 +116,39 @@ test('DIP landPattern：孔径/焊盘径采用推荐值', () => {
   const mod = generateFootprint({ mpn: 'LM358', pkg });
   assert.match(mod, /\(pad "1" thru_hole rect \(at -3\.81 [-\d.]+\) \(size 1\.6 1\.6\) \(drill 0\.9\)/);
 });
+
+test('filterFigures：关键词白名单+曲线黑名单+上限', async () => {
+  const { filterFigures } = await import('../lib/figfilter.js');
+  const mk = (kind, title, page = 1, y = Math.random()) => ({ kind, title, page, bbox: [0.1, y, 0.9, Math.min(0.98, y + 0.2)] });
+  const figs = [
+    mk('block_diagram', 'Figure 8-1. Functional Block Diagram', 10, 0.1),
+    mk('application', 'Figure 9-2. Typical Application Circuit', 20, 0.1),
+    mk('application', 'Figure 9-5. Application Curves', 21, 0.1),           // 黑名单：曲线
+    mk('application', 'Figure 6-3. Gain vs Frequency', 22, 0.1),            // 白名单未命中
+    mk('application', 'Simplified Schematic', 1, 0.2),
+    mk('application', 'Figure 9-8. Typical Application, Comparator', 23, 0.1),
+    mk('application', 'Figure 9-9. Typical Application, Follower', 24, 0.1), // 超上限 2 应被裁
+    mk('pin_configuration', 'D Package, 8-Pin SOIC (Top View)', 3, 0.1),
+    mk('pin_configuration', 'Random Photo', 4, 0.1),                        // 未命中
+    mk('block_diagram', 'Another Block Diagram', 11, 0.1)                   // 超上限 1
+  ];
+  const out = filterFigures(figs, { pkgCount: 5 });
+  assert.equal(out.filter((f) => f.kind === 'block_diagram').length, 1);
+  assert.equal(out.filter((f) => f.kind === 'application').length, 2);
+  assert.equal(out.filter((f) => f.kind === 'pin_configuration').length, 1);
+  assert.ok(!out.some((f) => /Curves|vs Frequency|Random/.test(f.title)));
+  // 带 Figure 编号的优先于无编号标题
+  assert.ok(out.some((f) => f.title.includes('Typical Application Circuit')));
+});
+
+test('findFigures：Application Curves 说明行不再入选', async () => {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const pg = doc.addPage([612, 792]);
+  pg.drawText('Figure 9-1. Typical Application Circuit', { x: 150, y: 500, size: 9, font });
+  pg.drawText('Figure 9-2. Application Curves', { x: 150, y: 200, size: 9, font });
+  const { pages } = await extractTextPages(Buffer.from(await doc.save()));
+  const figs = findFigures(pages);
+  assert.equal(figs.filter((f) => f.kind === 'application').length, 1);
+  assert.match(figs[0].title, /Circuit/);
+});
