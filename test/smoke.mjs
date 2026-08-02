@@ -46,6 +46,15 @@ try {
   const upOk = await post('/api/extract', { pdfBase64: okPdf.toString('base64'), fileName: 'ad5529r.pdf' });
   check('合法上传（mock 模式）→ 200', upOk.status === 200 && upOk.data.mock === true && /^local:/.test(upOk.data.meta?.pdfUrl), JSON.stringify(upOk.data.meta));
 
+  // 1.8 P0-3 fail-closed：无 Key 且未显式开 mock → 503
+  delete process.env.MOCK_MODE;
+  const fc = await post('/api/extract', { pdfUrl: 'https://www.ti.com/x.pdf' });
+  check('无Key且未显式mock → 503 fail-closed', fc.status === 503 && fc.data.code === 'model_not_configured', JSON.stringify(fc.data));
+  process.env.MOCK_MODE = '1';
+  // mock 响应必须带 non_promotable
+  const nm = await post('/api/extract', { pdfUrl: 'https://www.ti.com/x.pdf' });
+  check('mock 响应 non_promotable=true', nm.data.non_promotable === true);
+
   // 2. SSRF 拒绝
   const bad = await post('/api/extract', { pdfUrl: 'http://127.0.0.1/x.pdf' });
   check('SSRF 内网拒绝 400', bad.status === 400, bad.data.error);

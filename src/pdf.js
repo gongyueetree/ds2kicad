@@ -13,6 +13,9 @@ export function setLocalPdf(name, data) {
   cache = { url: null, doc: null };
 }
 
+let pdfToken = null;
+export function setPdfToken(t) { pdfToken = t || null; }
+
 export async function loadPdf(pdfUrl) {
   if (cache.url === pdfUrl && cache.doc) return cache.doc;
   let doc;
@@ -21,7 +24,7 @@ export async function loadPdf(pdfUrl) {
     // pdf.js 会转移(transfer) ArrayBuffer 所有权，必须拷贝一份，否则第二次加载报 detached
     doc = await pdfjsLib.getDocument({ data: localPdf.data.slice(0) }).promise;
   } else {
-    const proxied = `/api/fetch-pdf?url=${encodeURIComponent(pdfUrl)}`;
+    const proxied = `/api/fetch-pdf?url=${encodeURIComponent(pdfUrl)}${pdfToken ? `&token=${encodeURIComponent(pdfToken)}` : ''}`;
     doc = await pdfjsLib.getDocument({ url: proxied }).promise;
   }
   cache = { url: pdfUrl, doc };

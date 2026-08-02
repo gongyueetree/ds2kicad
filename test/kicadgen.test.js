@@ -90,13 +90,14 @@ test('generateAll：管脚数不一致给出 warning 而非抛错', () => {
   assert.ok(r.warnings.some((w) => w.includes('不一致')));
 });
 
-test('QFN 引脚数非 4 倍数 → 回退 dual + warning', () => {
+test('QFN 引脚数非 4 倍数 → 阻断生成且不可晋升（v0.8.1：不再以 dual 近似冒充）', () => {
   const inp = mockInput();
   inp.pkg = { ...inp.pkg, pinCount: 22 };
   inp.pins = inp.pins.slice(0, 22);
   const r = generateAll(inp);
-  assert.ok(r.warnings.some((w) => w.includes('4 的倍数')));
-  assert.ok(r.files.kicadMod.length > 100);
+  assert.ok(r.warnings.some((w) => /4 的倍数/.test(w) && /blocked_missing_geometry/.test(w)));
+  assert.equal(r.files.kicadMod, undefined, '不得产出封装文件');
+  assert.equal(r.nonPromotable, true);
 });
 
 test('DIP 封装生成通孔焊盘', () => {

@@ -1,58 +1,51 @@
-// api/fetch-pdf.js — PDF 代理（Edge Runtime，流式转发，绕过 CORS 与 4.5MB 响应限制）
-// 前端 pdf.js 通过本接口加载 ti.com 等站点的 PDF 进行页面渲染与图区截取。
-export const config = { runtime: 'edge' };
+// api/fetch-pdf.js — 受控 PDF 取回端点（v0.8.1 item 7）。
+// 变更：不再是公开 Edge 代理（任何人可传任意 URL 让本服务代抓）。
+// 现在改为 Node Serverless + SafeDownloader（逐跳重定向校验 / DNS 私网拒绝 / 流式字节上限），
+// 并要求短期签名令牌：签名由 /api/extract 在校验通过后签发，绑定 URL + 过期时间。
+// 说明：本仓库为无状态部署，尚无对象存储；签名 URL 机制以 HMAC 令牌等价实现，
+// 迁移到 ezPLM 后台后应替换为 对象存储 + 预签名 URL（见 docs/upgrade/01-v0.8.1-report.md）。
+import { safeDownload } from '../lib/safedl.js';
+import { signPdfToken, verifyPdfToken } from '../lib/pdftoken.js';
 
-const PRIVATE_HOST_RE =
-  /^(localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\]|\[fc|\[fd|\[fe80)/i;
+export const config = { runtime: 'nodejs' };
 
-export default async function handler(request) {
-  const { searchParams } = new URL(request.url);
-  const raw = searchParams.get('url') || '';
-  let target;
-  try {
-    target = new URL(raw);
-  } catch {
-    return json({ error: 'URL 格式无效' }, 400);
-  }
-  if (!/^https?:$/.test(target.protocol) || PRIVATE_HOST_RE.test(target.hostname)) {
-    return json({ error: '不允许的 URL' }, 400);
-  }
+export default async function handler(req, res) {
+  const origin = req.headers?.origin;
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  if (req.method === 'OPTIONS') return res.status(204).end();
 
-  const maxMb = Number(process.env.MAX_PDF_MB || 15);
-  let upstream;
-  try {
-    upstream = await fetch(target.toString(), {
-      redirect: 'follow',
-      headers: {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      'Accept': 'application/pdf,application/octet-stream,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'Referer': new URL(target).origin + '/'
-    }
+  const url = String(req.query?.url || '');
+  const token = String(req.query?.token || '');
+  if (!url) return res.status(400).json({ error: '缺少 url 参数' });
+
+  const v = verifyPdfToken(url, token);
+  if (!v.ok) {
+    return res.status(403).json({
+      error: `未授权的取回请求（${v.error}）。该端点不再作为公开代理，令牌由 /api/extract 校验通过后签发`
     });
-  } catch (e) {
-    return json({ error: `上游请求失败: ${e.message}` }, 502);
-  }
-  if (!upstream.ok) return json({ error: `上游返回 ${upstream.status}` }, 502);
-
-  const len = Number(upstream.headers.get('content-length') || 0);
-  if (len && len > maxMb * 1024 * 1024) {
-    return json({ error: `PDF 超过 ${maxMb}MB 限制` }, 413);
   }
 
-  return new Response(upstream.body, {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/pdf',
-      'Cache-Control': 'public, max-age=3600',
-      'Access-Control-Allow-Origin': '*'
+  const maxBytes = (Number(process.env.MAX_PDF_MB) || 15) * 1024 * 1024;
+  try {
+    const dl = await safeDownload(url, {
+      maxBytes,
+      timeoutMs: 20000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': 'application/pdf,application/octet-stream,*/*;q=0.8',
+        'Referer': new URL(url).origin + '/'
+      }
+    });
+    if (dl.buf.subarray(0, 5).toString('latin1') !== '%PDF-') {
+      return res.status(422).json({ error: '目标不是 PDF 文件' });
     }
-  });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.status(200).send(dl.buf);
+  } catch (e) {
+    return res.status(502).json({ error: `取回失败：${e.message}` });
+  }
 }
 
-function json(obj, status) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-  });
-}
+export { signPdfToken };

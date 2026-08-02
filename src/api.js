@@ -2,7 +2,10 @@
 async function post(path, body) {
   const r = await fetch(path, {
     method: 'POST',
+    // 鉴权令牌不得进入浏览器 bundle：浏览器直连时由同源会话/网关注入，
+    // 服务端到服务端调用在后端携带 API_TOKEN
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     body: JSON.stringify(body)
   });
   const data = await r.json().catch(() => ({}));

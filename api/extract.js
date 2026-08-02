@@ -5,13 +5,22 @@
 //   GEMINI_API_KEY 未配置或 MOCK_MODE=1 → 返回内置 TMUXL27518 演示数据（mock:true）
 import { validatePdfUrl, sanitizePins, sanitizePinsets, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
 import { extractWithGemini } from '../lib/gemini.js';
+import { signPdfToken } from '../lib/pdftoken.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
+
+/** P0-6：可选 Bearer Token（设置 API_TOKEN 后强制）；正式多租户认证由 ezPLM 网关承担 */
+export function checkAuth(req) {
+  const t = process.env.API_TOKEN;
+  if (!t) return true;
+  return (req.headers?.authorization || '') === `Bearer ${t}`;
+}
 
 export default async function handler(req, res) {
   const t0 = Date.now();
   const budgetMs = Number(process.env.EXTRACT_BUDGET_MS || 50000); // 平台 60s 上限内主动收口
   const remain = () => budgetMs - (Date.now() - t0);
   setCors(res, req);
+  if (req.method !== 'OPTIONS' && !checkAuth(req)) return res.status(401).json({ error: '未授权（需要 Bearer API_TOKEN）' });
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
@@ -40,12 +49,19 @@ export default async function handler(req, res) {
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
-  const mockMode = process.env.MOCK_MODE === '1' || !apiKey;
-  if (mockMode) {
+  const mockAllowed = process.env.MOCK_MODE === '1'; // P0-3：mock 必须显式开启，缺 Key 不再静默回退演示数据
+  if (!apiKey && !mockAllowed) {
+    return res.status(503).json({
+      error: '服务未配置：缺少 GEMINI_API_KEY（不再自动回退演示数据）。请在部署环境变量配置 Key，或显式设置 MOCK_MODE=1 用于联调',
+      code: 'model_not_configured'
+    });
+  }
+  if (mockAllowed) {
     return res.status(200).json({
       ...MOCK_TMUXL27518,
+      non_promotable: true, // P0-3：演示数据不可晋升为正式资产
       packages: MOCK_TMUXL27518.packages.map((p) => ({ ...p, family: guessFamily(p.type) })),
-      meta: { mode: 'mock', reason: apiKey ? 'MOCK_MODE=1' : 'GEMINI_API_KEY 未配置', pdfUrl: v.url }
+      meta: { mode: 'mock', reason: 'MOCK_MODE=1', pdfUrl: v.url }
     });
   }
 
@@ -55,41 +71,57 @@ export default async function handler(req, res) {
   if (uploaded) {
     pdfBuf = uploadedBuf;
   } else try {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 15000); // 下载上限 15s
-    // 国产厂商官网（novosns/ti.com.cn 等）常按 UA/Referer 防盗链：请求头浏览器化 + 带同源 Referer
+    // P0-4：统一 SafeDownloader（逐跳重定向校验 / DNS 私网拒绝 / 流式字节上限）
+    const { safeDownload } = await import('../lib/safedl.js');
     const origin = new URL(v.url).origin;
-    const r = await fetch(v.url, {
-      redirect: 'follow',
-      signal: ac.signal,
+    const dl = await safeDownload(v.url, {
+      maxBytes,
+      timeoutMs: 15000,
       headers: {
+        // 国产厂商官网（novosns/ti.com.cn 等）常按 UA/Referer 防盗链：请求头浏览器化 + 同源 Referer
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept': 'application/pdf,application/octet-stream,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         'Referer': origin + '/'
       }
-    }).finally(() => clearTimeout(timer));
-    if (!r.ok) return res.status(502).json({ error: `数据手册下载失败（上游 ${r.status}）` });
-    const ab = await r.arrayBuffer();
-    if (ab.byteLength > maxBytes) {
-      return res.status(413).json({ error: `PDF 超过 ${maxBytes / 1048576}MB 限制` });
-    }
-    pdfBuf = Buffer.from(ab);
+    });
+    pdfBuf = dl.buf;
     if (pdfBuf.subarray(0, 5).toString('latin1') !== '%PDF-') {
-      return res.status(422).json({ error: '该 URL 返回的不是 PDF 文件' });
+      // 诊断型报错：报告上游 Content-Type 与页面线索，给出可操作建议
+      let clue = '';
+      const head = pdfBuf.subarray(0, 4096).toString('utf8');
+      if (/html/i.test(dl.contentType) || head.includes('<')) {
+        const title = /<title[^>]*>([^<]{0,80})/i.exec(head);
+        clue = title ? `，页面标题「${title[1].trim()}」` : '';
+        if (/404|not found|不存在/i.test(head)) clue += '（疑似链接失效/404）';
+      }
+      return res.status(422).json({
+        error: `该 URL 返回的不是 PDF（Content-Type: ${dl.contentType || '未知'}${clue}）。建议：① 浏览器打开确认是否直达 PDF ② 找厂商官网真实下载直链（部分 /datasheet/ 路径是网页）③ 下载后用「上传本地 PDF」通道`
+      });
     }
   } catch (e) {
     const cnTip = /ti\.com\.cn/.test(v.url) ? '；ti.com.cn 从海外节点访问较慢，建议改用 www.ti.com 全球域名链接' : '';
-    const msg = e.name === 'AbortError' ? `数据手册下载超时（>15s）${cnTip}` : `数据手册下载失败: ${e.message}${cnTip}`;
-    return res.status(502).json({ error: msg });
+    return res.status(502).json({ error: `数据手册下载失败: ${e.message}${cnTip}` });
   }
 
   // ── 阶段 1：确定性程序化解析（零 AI 成本）──────────────────────────────
   // AI 只在程序化拿不到时按需介入；每个字段带来源溯源（parser / gemini）。
   let det = { textOk: false, part: null, pins: [], pinsets: [], pinConfidence: 'low', figures: [], relevantPages: [], assignPinsets: null };
+  let docProfile = null; // pdf-inspector 文档画像（TextBased/Scanned/Mixed + 需 OCR 页）
   if (process.env.DETERMINISTIC_FIRST !== '0') {
     try {
-      const { extractTextPages } = await import('../lib/pdftext.js');
+      const useInspector = process.env.PDF_PARSER === 'inspector';
+      const { extractTextPages } = useInspector
+        ? await import('../lib/parsers/pdfInspectorAdapter.js')  // 原生 NAPI，仅 Worker/本地显式开启
+        : await import('../lib/pdftext.js');
+      if (useInspector) {
+        try {
+          const { classify } = await import('../lib/parsers/pdfInspectorAdapter.js');
+          docProfile = await classify(pdfBuf); // { pdfType, confidence, pagesNeedingOcr }
+        } catch (e) {
+          docProfile = { pdfType: 'unknown', error: e.message };
+        }
+      }
       const { findPartInfo, parsePinTable, findFigures, selectRelevantPages, assignPinsets } = await import('../lib/heuristics.js');
       const { pages } = await extractTextPages(pdfBuf);
       const totalText = pages.reduce((n, p) => n + p.lines.length, 0);
@@ -99,6 +131,7 @@ export default async function handler(req, res) {
         const figs = findFigures(pages);
         det = {
           textOk: true,
+          textPages: pages.map((pg) => ({ page: pg.page, text: pg.lines.map((l) => l.text).join('\n').slice(0, 4000) })),
           part: pi.ok ? pi.part : null,
           pins: pt.pins,
           pinsets: pt.pinsets,
@@ -123,23 +156,35 @@ export default async function handler(req, res) {
 
   try {
     // 相关页切片：只喂首页+管脚页+机械图页+图区页，token/时延双降；失败回退整本
-    let geminiBuf = pdfBuf, sliced = false;
+    let geminiBuf = pdfBuf, sliced = false, pageMap = null, sliceStrategy = det.relevantPages.length ? 'parser_relevant_pages' : 'none';
     {
       const { slicePdf, pageCountOf } = await import('../lib/pdfslice.js');
       let pagesToUse = det.relevantPages;
       if (!pagesToUse.length) {
-        // 程序化未能定位相关页（扫描版/图形化排版）：确定性兜底切片 = 首 6 页 + 末 8 页（机械图惯例在书末）
+        // item 11：不再"前 6 页 + 后 8 页"盲切。按页面证据选页：
+        //   1) 有 pdf-inspector 画像时，剔除需 OCR 的页（喂过去也读不出文本，只会浪费预算）
+        //   2) 优先取"有文本且命中关键词（pin/package/mechanical/outline/dimension）"的页
+        //   3) 仍为空时保留首页 + 有文本的最后若干页（机械图惯例在书末），并记录该回退
         const total = await pageCountOf(pdfBuf);
-        if (total && total > 16) {
-          pagesToUse = [
-            ...Array.from({ length: 6 }, (_, i) => i + 1),
-            ...Array.from({ length: 8 }, (_, i) => total - 7 + i)
-          ];
+        const ocrPages = new Set(docProfile?.pagesNeedingOcr || []);
+        const textPages = (det.textPages || []).filter((tp) => !ocrPages.has(tp.page));
+        const KEY = /pin (configuration|functions)|package (outline|option|information)|mechanical|land pattern|dimension|引脚|封装|机械/i;
+        const hits = textPages.filter((tp) => KEY.test(tp.text)).map((tp) => tp.page);
+        if (hits.length) {
+          pagesToUse = [...new Set([1, ...hits])].sort((a, b) => a - b).slice(0, 20);
+          sliceStrategy = 'keyword_pages';
+        } else if (textPages.length) {
+          const tail = textPages.slice(-8).map((tp) => tp.page);
+          pagesToUse = [...new Set([1, ...tail])].sort((a, b) => a - b);
+          sliceStrategy = 'first_plus_text_tail';
+        } else if (ocrPages.size && total) {
+          // 全文档需 OCR：本版本没有 OCR Worker，不做盲切，交由 AI 读整本或走审核
+          sliceStrategy = 'scanned_no_ocr_worker';
         }
       }
       if (pagesToUse.length) {
         const s = await slicePdf(pdfBuf, pagesToUse);
-        if (s) { geminiBuf = s.buf; sliced = true; }
+        if (s) { geminiBuf = s.buf; sliced = true; pageMap = s.pageMap; }
       }
     }
     const raw = await extractWithGemini({
@@ -156,6 +201,7 @@ export default async function handler(req, res) {
       }
     });
 
+    if (sliced && pageMap) remapDerivedPages(raw, pageMap);
     let packages = (Array.isArray(raw?.packages) ? raw.packages : [])
       .map((p) => ({ ...sanitizePackage(p), family: guessFamily(p?.type || p?.name) }));
     if (!packages.length) packages.push(sanitizePackage({}));
@@ -182,11 +228,12 @@ export default async function handler(req, res) {
       : det.part;
     const recSet = pinsets.find((s2) => s2.id === packages[idx].pinsetId) || pinsets[0];
     const pins = recSet ? recSet.pins : [];
-    const { filterFigures } = await import('../lib/figfilter.js');
-    const figures = filterFigures(
+    const { filterFiguresDetailed } = await import('../lib/figfilter.js');
+    const figFiltered = filterFiguresDetailed(
       need.figures ? sanitizeFigures(raw?.figures) : sanitizeFigures(det.figures),
       { pkgCount: packages.length }
     );
+    const figures = figFiltered.figures;
 
     return res.status(200).json({
       mock: false,
@@ -196,18 +243,22 @@ export default async function handler(req, res) {
       pins,
       pinsets,
       figures,
+      figureCandidates: figFiltered.rejected, // 被过滤候选（含原因），供审核复活，不默认展示
       sources: {
         part: need.part ? 'gemini' : 'parser',
         packages: 'gemini',
         pins: need.pins ? 'gemini' : 'parser',
         figures: need.figures ? 'gemini' : 'parser'
       },
+      pdfToken: uploaded ? null : signPdfToken(v.url), // 供前端图区裁剪经受控端点取回
       meta: {
         mode: 'live',
         model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
         pdfUrl: v.url,
         pdfBytes: pdfBuf.length,
         strategy: det.textOk ? (need.pins ? 'hybrid' : 'parser-first') : 'gemini-full',
+        sliceStrategy,
+        docProfile: docProfile ? { pdfType: docProfile.pdfType, confidence: docProfile.confidence, ocrPageCount: (docProfile.pagesNeedingOcr || []).length } : null,
         pinConfidence: det.pinConfidence
       }
     });
@@ -231,6 +282,35 @@ export default async function handler(req, res) {
 }
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+/** P0-1：切片 PDF 的派生页码 → 原文页码反向映射（页码是证据，映射不了就删除引用，绝不带错误页码出门） */
+function remapDerivedPages(raw, pageMap) {
+  const map = (d) => {
+    const n = Math.round(Number(d));
+    return n >= 1 && n <= pageMap.length ? pageMap[n - 1] : null;
+  };
+  if (Array.isArray(raw?.figures)) {
+    raw.figures = raw.figures.filter((f) => {
+      const orig = map(f?.page);
+      if (orig === null) return false; // 无法映射 → 丢弃该图候选（宁缺勿错）
+      f.page = orig;
+      return true;
+    });
+  }
+  if (Array.isArray(raw?.packages)) {
+    for (const pk of raw.packages) {
+      if (Array.isArray(pk?.sourcePages)) {
+        pk.sourcePages = pk.sourcePages.map(map).filter((x) => x !== null);
+      }
+      if (pk?.landPattern && pk.landPattern.sourcePage !== undefined) {
+        const orig = map(pk.landPattern.sourcePage);
+        if (orig === null) delete pk.landPattern.sourcePage;
+        else pk.landPattern.sourcePage = orig;
+      }
+    }
+  }
+}
+export { remapDerivedPages }; // 供测试
 
 
 

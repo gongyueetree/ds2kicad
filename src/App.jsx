@@ -1,7 +1,8 @@
 // src/App.jsx — 主流程：贴 URL → 提取 → 确认（多封装/多 pinset）→ 批量生成 → 预览 → 导出
 import { useEffect, useMemo, useState } from 'react';
 import { apiExtract, apiGenerate } from './api.js';
-import { setLocalPdf } from './pdf.js';
+import { setLocalPdf, setPdfToken } from './pdf.js';
+import { applyReviewerEdit } from '../lib/validate.js';
 import PinTable from './components/PinTable.jsx';
 import PackageForm from './components/PackageForm.jsx';
 import FigureEditor from './components/FigureEditor.jsx';
@@ -17,6 +18,8 @@ export default function App() {
 
   const [url, setUrl] = useState(params.get('pdf') || DEMO_URL);
   const [file, setFile] = useState(null); // 上传模式的本地 PDF File
+  const [session, setSession] = useState(null); // ezPLM 会话：{origin, nonce, jobId}
+  const [reviewer, setReviewer] = useState(localStorage.getItem('ds2kicad.reviewer') || '');
   const [phase, setPhase] = useState('idle');
   const [error, setError] = useState('');
   const [extract, setExtract] = useState(null);
@@ -29,9 +32,16 @@ export default function App() {
   const [confirmTab, setConfirmTab] = useState('pins');
 
   useEffect(() => {
+    // 入站消息四重校验：精确 origin 白名单 + event.source 必须是父窗口 + nonce + jobId。
+    // 生产构建在 vite.config.js 已强制要求 VITE_EZPLM_ORIGINS 非空，此处不存在 '*' 回退。
+    const allowedOrigins = (import.meta.env.VITE_EZPLM_ORIGINS || '').split(',').map((x) => x.trim()).filter(Boolean);
     const onMsg = (e) => {
+      if (!allowedOrigins.includes(e.origin)) return;          // 无白名单 → 一律拒绝
+      if (e.source !== window.parent || e.source === window) return; // 必须来自宿主父窗口
       const d = e.data;
-      if (d && d.type === 'ezplm:ds2kicad:load' && typeof d.pdfUrl === 'string') {
+      if (!d || typeof d.nonce !== 'string' || !d.nonce || typeof d.jobId !== 'string' || !d.jobId) return;
+      setSession({ origin: e.origin, nonce: d.nonce, jobId: d.jobId });
+      if (d.type === 'ezplm:ds2kicad:load' && typeof d.pdfUrl === 'string') {
         setUrl(d.pdfUrl);
         doExtract(d.pdfUrl);
       }
@@ -75,6 +85,7 @@ export default function App() {
         payload = { pdfUrl: u };
       }
       const data = await apiExtract(payload);
+      setPdfToken(data.pdfToken); // 受控取回令牌（item 7）
       // pinsets 兼容：老响应无 pinsets 时由 pins 合成单一集
       const sets = Array.isArray(data.pinsets) && data.pinsets.length
         ? data.pinsets
@@ -103,7 +114,18 @@ export default function App() {
   const pinsOf = (p) => pinsets.find((s) => s.id === p?.pinsetId)?.pins || pinsets[0]?.pins || [];
   const setPinsOf = (p, pins) =>
     setPinsets(pinsets.map((s) => (s.id === (p?.pinsetId || pinsets[0]?.id) ? { ...s, pins } : s)));
-  const updatePkg = (next) => setPkgs(pkgs.map((p, i) => (i === pkgIndex ? next : p)));
+  // item 10：人工修改必须留 reviewer provenance，并重算 missingFields
+  const updatePkg = (next) => {
+    const cur = pkgs[pkgIndex] || {};
+    const changed = Object.keys(next).filter((k) => typeof next[k] === 'number' && next[k] !== cur[k]);
+    let out = next;
+    if (changed.length && reviewer) {
+      out = { ...cur };
+      for (const k of changed) out = applyReviewerEdit(out, k, next[k], reviewer, '人工确认修改');
+      out = { ...next, fieldProvenance: out.fieldProvenance, missingFields: out.missingFields, relevantFields: out.relevantFields };
+    }
+    setPkgs(pkgs.map((p, i) => (i === pkgIndex ? out : p)));
+  };
   const sharedWith = pkg ? pkgs.filter((p) => p.pinsetId === pkg.pinsetId).map((p) => p.name) : [];
 
   const doGenerate = async () => {
@@ -112,7 +134,7 @@ export default function App() {
     setPhase('generating');
     setError('');
     try {
-      const result = await apiGenerate({ part, items });
+      const result = await apiGenerate({ part, items, mock: !!extract.mock }); // mock 标志全链路传递
       setGenResult(result);
       setPhase('confirm');
       setTimeout(() => document.getElementById('preview-anchor')?.scrollIntoView({ behavior: 'smooth' }), 100);
@@ -201,6 +223,15 @@ export default function App() {
         <>
           <section className="card">
             <h2>① 器件信息确认</h2>
+            <p className="hint">
+              审核者标识（人工修改字段需署名，否则该字段视为未验证、不可晋升）：
+              <input
+                style={{ width: 180, marginLeft: 8, display: 'inline-block' }}
+                value={reviewer}
+                placeholder="你的姓名/工号"
+                onChange={(e) => { setReviewer(e.target.value); localStorage.setItem('ds2kicad.reviewer', e.target.value); }}
+              />
+            </p>
             <div className="part-grid">
               <label>型号<input value={part.mpn} onChange={(e) => setPart({ ...part, mpn: e.target.value })} /></label>
               <label>厂商<input value={part.manufacturer} onChange={(e) => setPart({ ...part, manufacturer: e.target.value })} /></label>
@@ -233,6 +264,7 @@ export default function App() {
                 selectedIndex={pkgIndex}
                 pkg={pkg}
                 pinsets={pinsets}
+                reviewer={reviewer}
                 onSelect={setPkgIndex}
                 onChange={updatePkg}
               />
@@ -264,7 +296,7 @@ export default function App() {
               </section>
               <section className="card">
                 <h2>⑥ 导出</h2>
-                <ExportPanel bundle={genResult} confirmed={confirmed} pdfUrl={extract.pdfUrl} embedded={embedded} />
+                <ExportPanel bundle={genResult} confirmed={confirmed} pdfUrl={extract.pdfUrl} embedded={embedded} session={session} />
               </section>
             </>
           )}
