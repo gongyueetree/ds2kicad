@@ -8,6 +8,7 @@ const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用�
 export default function FigureGallery({ pdfUrl, figures }) {
   const [thumbs, setThumbs] = useState({}); // key(page|bbox) → dataURL
   const [status, setStatus] = useState('');
+  const [diag, setDiag] = useState({});   // 诊断信息：页码/bbox/是否空白
 
   useEffect(() => {
     if (!figures?.length) return;
@@ -22,7 +23,24 @@ export default function FigureGallery({ pdfUrl, figures }) {
           const { canvas } = await renderPage(doc, page, 1200);
           const url = cropToDataUrl(canvas, f.bbox, 1);
           if (dead) return;
+          // 诊断：检测裁剪结果是否近乎全白（bbox 落在空白区/页码错位的典型表现）
+          let blank = false;
+          try {
+            const probe = document.createElement('canvas');
+            probe.width = 32; probe.height = 32;
+            const pctx = probe.getContext('2d', { willReadFrequently: true });
+            const img = new Image();
+            await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+            pctx.drawImage(img, 0, 0, 32, 32);
+            const data = pctx.getImageData(0, 0, 32, 32).data;
+            let nonWhite = 0;
+            for (let i = 0; i < data.length; i += 4) {
+              if (data[i] < 245 || data[i + 1] < 245 || data[i + 2] < 245) nonWhite++;
+            }
+            blank = nonWhite < 8;
+          } catch { /* 探测失败不影响展示 */ }
           setThumbs((prev) => ({ ...prev, [key]: url }));
+          setDiag((prev) => ({ ...prev, [key]: { page, bbox: f.bbox, blank, pageCount: doc.numPages } }));
         }
         setStatus('');
       } catch (e) {
@@ -46,6 +64,11 @@ export default function FigureGallery({ pdfUrl, figures }) {
                 ? <img src={thumbs[key]} alt={f.title} loading="lazy" />
                 : <div className="stage-empty">渲染中…</div>}
               <figcaption>
+                {diag[key]?.blank && (
+                  <span className="src-badge src-fallback" title={`page=${diag[key].page}/${diag[key].pageCount} bbox=${JSON.stringify(diag[key].bbox)}`}>
+                    ⚠ 裁剪区域为空白（p.{diag[key].page}，bbox {diag[key].bbox.map((n) => n.toFixed(2)).join(',')}）— 请在 ④ 重新框选
+                  </span>
+                )}
                 <span className={`src-badge ${f.confirmed ? 'src-parser' : 'src-fallback'}`}>
                   {f.confirmed ? '✓ 已确认' : '待确认'}
                 </span>

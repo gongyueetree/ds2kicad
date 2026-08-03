@@ -318,3 +318,36 @@ test('反例12：degraded 形状的响应与 Job IR 一致（真实 handler 契�
   // 响应体中不得出现重复键导致的覆盖（JSON 解析后只剩最后一个，此处校验其确实带 packageId）
   assert.ok(ex.data.packages.every((p) => p.packageId && p.fieldProvenance));
 });
+
+test('v0.8.6 修复：EZPLM_JWT_SECRET 已配 + AUTH_MODE=dev 时，无 token 必须回退匿名并可访问作业', async () => {
+  const { authenticate, authorizeJobAccess } = await import('../lib/auth.js');
+  const saved = process.env.AUTH_MODE;
+  try {
+    // 关键回归：此前 dev 分支写在 `if (!key)` 内，两者同时配置时 dev 完全失效
+    process.env.AUTH_MODE = 'dev';
+    const r = authenticate({ headers: {} });
+    assert.equal(r.ok, true, '配了密钥也应在 dev 模式放行匿名');
+    assert.equal(r.session.authenticated, false);
+    assert.equal(r.session.devMode, true);
+    // 匿名会话必须能访问自己的作业（否则只能 extract 不能 generate）
+    const az = authorizeJobAccess(r.session, { tenantId: 'dev', ownerId: 'dev-anonymous' });
+    assert.equal(az.ok, true, JSON.stringify(az));
+    // 但仍必须被闸门标记为不可晋升
+    const { generateBundle } = await import('../lib/kicadgen/index.js');
+    const { sanitizePackage } = await import('../lib/validate.js');
+    const g = generateBundle({
+      part: { mpn: 'T' }, sessionAuthenticated: r.session.authenticated === true, pinsReviewRequired: false,
+      confirmedFigureCount: 1, figures: [{ figureId: 'f', confirmed: true, evidence: {} }],
+      items: [{ pkg: sanitizePackage({ name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6, leadLength: 1, height: 1.75 }), pins: [{ number: '1', name: 'A', type: 'passive' }] }]
+    });
+    assert.ok(g.reasons.includes('no_authenticated_ezplm_session'), 'dev 匿名结果必须不可晋升');
+    // production 模式无 token 仍必须 401
+    process.env.AUTH_MODE = 'production';
+    assert.equal(authenticate({ headers: {} }).status, 401);
+    // dev 模式下带了 token 仍走正常验签（伪造 token 必须拒绝）
+    process.env.AUTH_MODE = 'dev';
+    assert.equal(authenticate({ headers: { authorization: 'Bearer forged.token.here' } }).ok, false);
+  } finally {
+    process.env.AUTH_MODE = saved;
+  }
+});
