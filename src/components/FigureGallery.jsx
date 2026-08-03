@@ -50,7 +50,17 @@ export default function FigureGallery({ pdfUrl, figures }) {
         }
         setStatus('');
       } catch (e) {
-        if (!dead) setStatus(`图集渲染失败：${e.message}（请检查 /api/job-pdf 是否返回 200）`);
+        if (dead) return;
+        // 把失败原因落到每张卡片上，避免"整片空白但没有任何提示"
+        const msg = /Unexpected server response \((\d+)\)/.test(e.message)
+          ? `PDF 取回失败（HTTP ${RegExp.$1}）：${RegExp.$1 === '409' ? '该作业没有缓存 PDF 字节，请重新提取' : RegExp.$1 === '401' || RegExp.$1 === '403' ? '会话无权访问该作业' : e.message}`
+          : `PDF 加载失败：${e.message}`;
+        setStatus(msg);
+        setDiag((prev) => {
+          const next = { ...prev };
+          for (const f of figures) next[`${f.page}|${f.bbox.join(',')}`] = { page: f.page, bbox: f.bbox, error: msg };
+          return next;
+        });
       }
     })();
     return () => { dead = true; };

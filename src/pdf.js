@@ -22,8 +22,13 @@ export function setJobId(id) { jobId = id || null; }
 export async function loadPdf(pdfUrl) {
   if (cache.url === pdfUrl && cache.doc) return cache.doc;
   let doc;
+  // 上传通道：浏览器已持有原始字节，直接用，避免绕服务端（v0.8.7 修复图集空白）
+  if (localPdf && (String(pdfUrl).startsWith('local:') || pdfUrl === `local:${localPdf.name}`)) {
+    doc = await pdfjsLib.getDocument({ data: localPdf.data.slice(0) }).promise;
+    cache = { url: pdfUrl, doc };
+    return doc;
+  }
   if (String(pdfUrl).startsWith('local:')) {
-    if (!localPdf) throw new Error('本地 PDF 已失效，请重新上传');
     // pdf.js 会转移(transfer) ArrayBuffer 所有权，必须拷贝一份，否则第二次加载报 detached
     doc = await pdfjsLib.getDocument({ data: localPdf.data.slice(0) }).promise;
   } else {

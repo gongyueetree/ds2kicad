@@ -13,6 +13,16 @@ import { makeAnchor, SOURCE_TYPE } from '../lib/evidence.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
 
 export default async function handler(req, res) {
+  try {
+    return await handleExtract(req, res);
+  } catch (e) {
+    // 兜底：任何未预期异常都必须返回响应，绝不能让请求悬挂
+    console.error('[extract] unhandled', e);
+    if (!res.headersSent) return res.status(500).json({ error: `内部错误：${e.message}`, code: 'internal_error' });
+  }
+}
+
+async function handleExtract(req, res) {
   const t0 = Date.now();
   const budgetMs = Number(process.env.EXTRACT_BUDGET_MS || 50000); // 平台 60s 上限内主动收口
   const remain = () => budgetMs - (Date.now() - t0);
@@ -63,7 +73,10 @@ export default async function handler(req, res) {
       pinsets: sanitizePinsets(MOCK_TMUXL27518.pinsets, []),
       figures: MOCK_TMUXL27518.figures,
       mock: true,                       // 服务端权威，客户端无法删除
-      pdfUrl: v.url
+      pdfUrl: v.url,
+      // 图集裁剪复用：上传通道的 PDF 也必须缓存，否则 /api/job-pdf 无字节可返回（409）。
+      // 注意 mock 分支早于 pdfBuf 声明，此处只能用已解码的 uploadedBuf（URL 通道 mock 无字节）
+      pdfBase64: uploadedBuf && uploadedBuf.length <= 6 * 1024 * 1024 ? uploadedBuf.toString('base64') : null
     });
     const store0 = await getJobStore();
     const job = await store0.create({
@@ -99,9 +112,10 @@ export default async function handler(req, res) {
     // P0-4：统一 SafeDownloader（逐跳重定向校验 / DNS 私网拒绝 / 流式字节上限）
     const { safeDownload } = await import('../lib/safedl.js');
     const origin = new URL(v.url).origin;
-    const dl = await safeDownload(v.url, {
+    // 慢速源站（analog.com / ti.com.cn 等）：延长单次超时并重试一次
+    const attemptDownload = (timeoutMs) => safeDownload(v.url, {
       maxBytes,
-      timeoutMs: 15000,
+      timeoutMs,
       headers: {
         // 国产厂商官网（novosns/ti.com.cn 等）常按 UA/Referer 防盗链：请求头浏览器化 + 同源 Referer
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -110,6 +124,13 @@ export default async function handler(req, res) {
         'Referer': origin + '/'
       }
     });
+    let dl;
+    try {
+      dl = await attemptDownload(Math.min(25000, Math.max(10000, remain() - 20000)));
+    } catch (e1) {
+      if (remain() < 15000) throw e1;
+      dl = await attemptDownload(Math.min(20000, Math.max(8000, remain() - 8000)));   // 重试一次
+    }
     pdfBuf = dl.buf;
     if (pdfBuf.subarray(0, 5).toString('latin1') !== '%PDF-') {
       // 诊断型报错：报告上游 Content-Type 与页面线索，给出可操作建议
@@ -125,8 +146,11 @@ export default async function handler(req, res) {
       });
     }
   } catch (e) {
-    const cnTip = /ti\.com\.cn/.test(v.url) ? '；ti.com.cn 从海外节点访问较慢，建议改用 www.ti.com 全球域名链接' : '';
-    return res.status(502).json({ error: `数据手册下载失败: ${e.message}${cnTip}` });
+    const slow = /analog\.com|ti\.com\.cn|novosns|st\.com/.test(v.url);
+    const tip = /ti\.com\.cn/.test(v.url)
+      ? '；ti.com.cn 从海外节点访问较慢，建议改用 www.ti.com 全球域名链接'
+      : slow ? '；该源站从服务端访问较慢，建议改用「上传本地 PDF」通道（≤3MB）' : '';
+    return res.status(502).json({ error: `数据手册下载失败: ${e.message}${tip}`, code: 'download_failed', suggestUpload: slow });
   }
 
   const docSha = sha256(pdfBuf); // item 10：证据锚点的文档标识
