@@ -143,3 +143,62 @@ test('PG-8：并发 create 同 Idempotency-Key 只产生一个 Job', async (t) =
   const ids = new Set(results.map((r) => r.jobId));
   assert.equal(ids.size, 1, `并发创建应收敛为 1 个 Job，实际 ${ids.size}`);
 });
+
+test('PG-9：Lifecycle + AssetVersion + Manifest 全部事务化（item 12）', async (t) => {
+  if (skipIfNoDb(t)) return;
+  const { approveAssets, publishAssets } = await import('../lib/lifecycle.js');
+  const base = {
+    part: { mpn: 'TXN' },
+    packages: [{ packageId: 'pkg_1', pinsetId: 'default' }],
+    pinsets: [{ id: 'default' }], figures: [],
+    lifecycle: { state: 'reviewed' }
+  };
+  const job = await store.create({ ir: base, tenantId: 'tx', ownerId: 'u1' });
+  // approve：IR + audit + manifest 同事务
+  const approved = approveAssets(base, { keys: ['footprint:pkg_1'], actor: 'u1', revision: job.revision, irHash: 'ih', manifestHash: 'mh', reason: 'ok' });
+  const c1 = await store.commitGeneration(job.jobId, {
+    ir: approved, expectedRevision: job.revision, actor: 'u1',
+    auditEntries: [{ action: 'lifecycle_approve', detail: { assets: ['footprint:pkg_1'] } }],
+    manifest: { irSha256: 'ih', partBundleSha256: 'pb', files: [{ path: 'a', sha256: 'x' }] }
+  });
+  assert.equal(c1.ok, true);
+  assert.ok(c1.job.ir.lifecycle.approvals['footprint:pkg_1']);
+  // publish：不可变 AssetVersion 落库
+  const published = publishAssets(c1.job.ir, {
+    keys: ['footprint:pkg_1'], actor: 'u1', revision: c1.job.revision,
+    irHash: 'ih', manifestHash: 'mh', manifest: { files: [{ path: 'a', sha256: 'x', bytes: 1 }] }
+  });
+  const c2 = await store.commitGeneration(job.jobId, {
+    ir: published, expectedRevision: c1.job.revision, actor: 'u1',
+    auditEntries: [{ action: 'lifecycle_publish', detail: { assets: ['footprint:pkg_1'] } }],
+    manifest: { irSha256: 'ih', partBundleSha256: 'pb', files: [{ path: 'a', sha256: 'x' }] }
+  });
+  assert.equal(c2.ok, true);
+  const versions = c2.job.ir.assetVersions;
+  assert.equal(versions.length, 1);
+  assert.equal(versions[0].versionId, `footprint:pkg_1@r${c1.job.revision}`);
+  assert.equal(versions[0].immutable, true);
+  assert.ok(versions[0].files.length === 1);
+  // 事务性：冲突提交不得写入任何一部分
+  const beforeAudit = (await store.listAudit(job.jobId)).length;
+  const bad = await store.commitGeneration(job.jobId, {
+    ir: { ...published, part: { mpn: 'SHOULD-NOT' } }, expectedRevision: 99, actor: 'u1',
+    auditEntries: [{ action: 'never_appears' }], manifest: { irSha256: 'z', files: [] }
+  });
+  assert.equal(bad.ok, false);
+  const afterAudit = await store.listAudit(job.jobId);
+  assert.equal(afterAudit.length, beforeAudit);
+  assert.ok(!afterAudit.some((a) => a.action === 'never_appears'));
+  assert.equal((await store.get(job.jobId)).job.ir.part.mpn, 'TXN');
+});
+
+test('PG-10：revoke 事务化且撤销后不可读', async (t) => {
+  if (skipIfNoDb(t)) return;
+  const job = await store.create({ ir: { part: { mpn: 'RV' } }, tenantId: 'tx', ownerId: 'u1' });
+  await store.revoke(job.jobId, 'u1');
+  const g = await store.get(job.jobId);
+  assert.equal(g.ok, false);
+  assert.equal(g.code, 'job_revoked');
+  const audit = (await store.listAudit(job.jobId)).map((a) => a.action);
+  assert.ok(audit.includes('job_revoked'));
+});

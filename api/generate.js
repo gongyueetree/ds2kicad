@@ -6,7 +6,7 @@ import { setCors } from './extract.js';
 import { getJobStore } from '../lib/jobstore.js';
 import { authenticate, authorizeJobAccess, hasRole } from '../lib/auth.js';
 import { runCanonicalPipeline } from '../lib/canonical.js';
-import { transition, currentState, computeCanPublish, STATE } from '../lib/lifecycle.js';
+import { currentState, computeCanPublish, enumerateAssetKeys, isApprovalValid } from '../lib/lifecycle.js';
 import { signAssetToken } from '../lib/assettoken.js';
 
 const FORBIDDEN_CLIENT_FIELDS = ['part', 'items', 'pins', 'pinsets', 'packages', 'mock', 'provenance', 'fieldProvenance', 'nonPromotable', 'reviewer', 'figures', 'ir', 'lifecycle'];
@@ -47,30 +47,31 @@ export default async function handler(req, res) {
   }
 
   const canReview = hasRole(session, 'reviewer');
+  // item 1/2：预跑一次以确定是否有实质修改 → 决定最终 revision，再以最终值生成产物
+  const probe = runCanonicalPipeline({ job, patch, session, includeIds: patch.includePackageIds, markReviewed: canReview });
+  if (!probe.ok) return res.status(probe.status).json({ error: probe.error, code: probe.code, ...(probe.errors ? { errors: probe.errors } : {}) });
+  const willCommit = probe.changeLog.length > 0;
+  const finalRevision = willCommit ? job.revision + 1 : job.revision;
   const result = runCanonicalPipeline({
     job, patch, session,
     includeIds: patch.includePackageIds,
-    markReviewed: canReview
+    markReviewed: canReview,
+    finalRevision, finalState: probe.state
   });
-  if (!result.ok) {
-    return res.status(result.status).json({ error: result.error, code: result.code, ...(result.errors ? { errors: result.errors } : {}) });
-  }
-
+  if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code, ...(result.errors ? { errors: result.errors } : {}) });
   let irToSave = result.normalizedIr;
   let revision = job.revision;
 
-  // 有实质修改 → 状态机推进到 edited，并在同一事务里保存 IR + audit + manifest
-  if (result.changeLog.length) {
-    const t = transition(irToSave, 'edit', { actor: session.sub, role: 'reviewer', reason: 'review_patch' });
-    if (!t.ok) return res.status(409).json({ error: t.error, code: t.code });
-    irToSave = t.ir;
+  // item 1/12：原子提交 IR + revision + audit + manifest（含完整 manifest，而非仅摘要）
+  if (willCommit) {
     const commit = await store.commitGeneration(job.jobId, {
       ir: irToSave,
       expectedRevision: job.revision,
       actor: session.sub,
       auditEntries: [
         { action: 'review_patch_applied', detail: { changes: result.changeLog.length, paths: result.changeLog.map((c) => c.path).slice(0, 50) } },
-        { action: 'assets_generated', detail: { nonPromotable: result.bundle.nonPromotable, files: result.assets.files.length } }
+        { action: 'approvals_invalidated', detail: { invalidated: result.invalidated } },
+        { action: 'assets_generated', detail: { nonPromotable: result.bundle.nonPromotable, files: result.assets.allFiles.length, irHash: result.irHash } }
       ],
       manifest: result.assets.manifest
     });
@@ -91,11 +92,19 @@ export default async function handler(req, res) {
     partBundle: result.assets.partBundle,
     manifest: result.assets.manifest,
     // item 9：真实文件内容 + 与 tenant/job/revision 绑定的短期下载令牌
-    assetFiles: result.assets.files.map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, content: f.content })),
+    assetFiles: result.assets.allFiles.map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, content: f.content, encoding: f.encoding || 'utf8' })),
     assetToken,
     reviewer: irToSave.lifecycle?.reviewedBy || null,
     canReview,
-    canPublish: computeCanPublish(irToSave, result.bundle.assetPromotion || {}, hasRole(session, 'publisher'))
+    // item 3/11：资产版本级发布许可（键为 symbol:<pinsetId> / footprint:<packageId> / …）
+    canPublish: Object.fromEntries(enumerateAssetKeys(irToSave).map((key) => {
+      const kind = key.split(':')[0];
+      const promotable = (result.bundle.assetPromotion || {})[kind === 'figure' ? 'figures' : kind] === true;
+      return [key, isApprovalValid(irToSave, key, { revision, irHash: result.irHash }) && promotable && hasRole(session, 'publisher')];
+    })),
+    assetPromotionByKind: result.bundle.assetPromotion || {},
+    irHash: result.irHash,
+    invalidatedApprovals: result.invalidated
   });
 }
 

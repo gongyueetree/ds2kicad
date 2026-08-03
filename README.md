@@ -37,6 +37,19 @@
 - Gemini 响应经 3 次重试（指数退避）+ `repairJSON()`，`maxOutputTokens=16384` 防截断。
 - `DETERMINISTIC_FIRST=0` 可关闭混合策略回到全量 AI（对照调试用）。
 
+## 一·二、v0.8.6 生产闭环要点（必读）
+
+- **Canonical Pipeline 顺序固定**：Patch → strict validate → **geometry normalization** → Final immutable IR（`Object.freeze`）→ lifecycle transition → 确定最终 revision → generate → manifest → **原子提交**。生成器不得在 Final IR 之后修改任何几何数值（`geometryNormalized` 冻结标记）。
+- **一致性自检覆盖全部关键面**：`verifyConsistency` 比对几何逐字段、landPattern、revision、state、lifecycle、Figure、文件哈希与文件名尺寸后缀；任一不符即整体失败且**不修改 Job**。
+- **批准是资产版本级**：键为 `symbol:<pinsetId>` / `footprint:<packageId>` / `model3d:<packageId>` / `figure:<figureId>`，绑定 revision + irHash + manifestHash + assetHash，支持分批 approve/publish。
+- **编辑自动失效批准**：按变更路径判定受影响范围（封装几何→该封装 footprint/3D；管脚→该 pinset 的 symbol 及引用它的封装；图区→该图；MPN→全部），并作废整体 review 结论。
+- **Publish 创建不可变 AssetVersion**（`<assetKey>@r<revision>`，含文件清单与哈希），不是只改状态。
+- **Lifecycle API 必须携带 `expectedRevision`**；review/approve/publish/revoke 全部走事务。
+- **Figure 文件链**：浏览器裁剪 → `POST /api/figure-upload`（校验 PNG 魔数与 IHDR 尺寸）→ 服务端保存并写 `imagePath`/`imageSha256` → Part Bundle / Manifest / ZIP / postMessage **引用同一文件**。
+- **postMessage 协议 v3**：发送 `jobId` / `revision` / `state` / `assetToken` / `manifest` / `files.entries[{path, sha256, bytes, encoding, content}]`（真实字节），并等待宿主 `ezplm:ds2kicad:ack` 回执（3 秒超时）。
+- **全程使用 ID**：packageId / pinsetId / figureId，生成链与 Part Bundle 不再按名称回查资产（同名封装曾因此匹配错对象）。
+- **可注入 Stub**：`GEMINI_STUB`（JSON 或 `throw:<msg>`）、`OCR_STUB` 让 live / degraded **走真实服务端分支**用于测试。
+
 ## 一·三、v0.8.5 生产闭环要点（必读）
 
 - **唯一 Canonical 流程**：Patch → 严格校验 → normalized Reviewed IR → 生成/自检 → **单事务**保存 IR+revision+audit+manifest。生成失败绝不修改 Job；响应 `reviewedIr`、数据库 IR、Part Bundle、KiCad 全部来自同一份 normalized IR。
@@ -142,8 +155,11 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
 // 宿主 → 插件：注入数据手册并立即开始提取
 iframe.contentWindow.postMessage({ type: 'ezplm:ds2kicad:load', pdfUrl: 'https://…' }, PLUGIN_ORIGIN);
 
-// 插件 → 宿主（v3）：payload 含 mock / nonPromotable / promotionBlockReasons /
-// assetToken（tenant+job+revision 绑定，15 分钟）/ files.entries（含真实 content）
+// 插件 → 宿主（协议 v3）：
+//   { type:'ezplm:ds2kicad:result', version:3, jobId, revision, state, nonce,
+//     assetToken, manifest, bundle, mock, nonPromotable, promotionBlockReasons,
+//     files:{ entries:[{ path, sha256, bytes, encoding:'utf8'|'base64', content }] } }
+// 宿主必须回执：{ type:'ezplm:ds2kicad:ack', jobId, nonce, receivedFiles }
 window.addEventListener('message', (e) => {
   if (e.origin !== PLUGIN_ORIGIN) return;          // 必须校验来源
   if (e.data?.type === 'ezplm:ds2kicad:result') {

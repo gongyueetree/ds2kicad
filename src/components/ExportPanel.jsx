@@ -95,15 +95,24 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
       try { figs = await exportFigures(pdfUrl, okFigs); } catch { /* 无图也发送 */ }
       const payload = {
         type: 'ezplm:ds2kicad:result',
-        version: 2,
+        version: 3,                       // item 7：协议 v3
+        jobId: bundle.jobId,
+        revision: bundle.revision,
+        state: bundle.state,
+        assetToken: bundle.assetToken,    // 绑定 tenant/job/revision，15 分钟
+        manifest: bundle.manifest,
         mock: !!bundle.mock,
         nonPromotable: !!bundle.nonPromotable,
         promotionBlockReasons: bundle.reasons || [],
         bundle: bundle.partBundle ?? null,
         // item 8：postMessage 只传服务端确认的文件清单（路径已清洗）+ 内容
+        // item 7：发送真实文件内容（content + encoding），宿主可完整还原字节
         files: {
-          manifest: bundle.manifest || null,
-          entries: (bundle.assetFiles || []).map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes }))
+          entries: (bundle.assetFiles || []).map((f) => ({
+            path: f.path, sha256: f.sha256, bytes: f.bytes,
+            encoding: f.encoding || 'utf8',
+            content: f.content
+          }))
         }
       };
       // 出站必须精确 targetOrigin，且必须回带握手 nonce/jobId；无会话则拒发（绝不使用 '*'）
@@ -113,7 +122,26 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
         setBusy('未完成 ezPLM 握手（缺少 origin/nonce/jobId），拒绝发送');
         return;
       }
-      window.parent.postMessage({ ...payload, nonce: session.nonce, jobId: session.jobId }, target);
+      // item 7：等待宿主 ACK（3 秒超时），确保投递成功而非"发出即忘"
+      const ackPromise = new Promise((resolve) => {
+        const onAck = (e) => {
+          if (e.origin !== target) return;
+          const d = e.data;
+          if (d?.type === 'ezplm:ds2kicad:ack' && d.jobId === bundle.jobId && d.nonce === session.nonce) {
+            window.removeEventListener('message', onAck);
+            resolve({ ok: true, receivedFiles: d.receivedFiles });
+          }
+        };
+        window.addEventListener('message', onAck);
+        setTimeout(() => { window.removeEventListener('message', onAck); resolve({ ok: false }); }, 3000);
+      });
+      window.parent.postMessage({ ...payload, nonce: session.nonce, hostJobId: session.jobId }, target);
+      const ack = await ackPromise;
+      setBusy(ack.ok
+        ? `已发送并收到宿主 ACK（${ack.receivedFiles ?? payload.files.entries.length} 个文件）✓`
+        : '已发送，但未在 3 秒内收到宿主 ACK —— 请确认 ezPLM 侧已实现 ezplm:ds2kicad:ack 回执');
+      setTimeout(() => setBusy(''), 4000);
+      return;
       setBusy('已通过 postMessage 发送给宿主页面 ✓');
       setTimeout(() => setBusy(''), 2500);
     } catch (e) {

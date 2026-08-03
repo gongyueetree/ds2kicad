@@ -196,12 +196,21 @@ export default function App() {
           });
         }
       }
-      // item 2：只提交真正变化的 Figures
+      // item 8：Figures 支持新增 / 修改 / 删除；新增用稳定临时 ID，服务端返回正式 ID
       const figPatches = [];
+      const addFigures = [];
+      const removeFigures = [];
       for (const f of figures) {
         if (!f.figureId) continue;
         const o = (orig.figures || []).find((x) => x.figureId === f.figureId);
-        if (!o) continue;
+        if (!o) {
+          addFigures.push({
+            tempId: f.figureId,               // 稳定临时 ID（fig_tmp_*）
+            kind: f.kind, title: f.title, page: Number(f.page), bbox: f.bbox,
+            confirmed: !!f.confirmed, reason: '页面新增图区'
+          });
+          continue;
+        }
         const d = { figureId: f.figureId };
         let t = false;
         if (!!f.confirmed !== !!o.confirmed) { d.confirmed = !!f.confirmed; t = true; }
@@ -210,6 +219,11 @@ export default function App() {
         if (f.kind !== o.kind) { d.kind = f.kind; t = true; }
         if ((f.title ?? '') !== (o.title ?? '')) { d.title = f.title; t = true; }
         if (t) figPatches.push(d);
+      }
+      for (const o of orig.figures || []) {
+        if (!figures.some((f) => f.figureId === o.figureId)) {
+          removeFigures.push({ figureId: o.figureId, reason: '页面删除图区' });
+        }
       }
       const result = await apiGenerate({
         jobId: extract.jobId,
@@ -220,7 +234,9 @@ export default function App() {
           ...(Object.keys(partPatch).length ? { part: partPatch } : {}),
           ...(pkgPatches.length ? { packages: pkgPatches } : {}),
           ...(pinsetPatches.length ? { pinsets: pinsetPatches } : {}),
-          ...(figPatches.length ? { figures: figPatches } : {})
+          ...(figPatches.length ? { figures: figPatches } : {}),
+          ...(addFigures.length ? { addFigures } : {}),
+          ...(removeFigures.length ? { removeFigures } : {})
         }
       });
       // item 2：用服务端 reviewedIr 回写页面，保证页面与权威 IR 一致

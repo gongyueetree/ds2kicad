@@ -71,6 +71,7 @@ export default async function handler(req, res) {
       datasheetSha256: uploadedBuf ? sha256(uploadedBuf) : null,
       idempotencyKey: req.headers?.['idempotency-key'] || null, operation: 'extract'
     });
+    // item 9：复用既有 Job 时一律以 job.ir 为准（下方响应已全部取自 job.ir）
     // item 4：不再展开 MOCK_TMUXL27518 后又被后续键覆盖 —— 显式构造响应，
     // packages/pinsets/figures 一律来自已带稳定 ID 的 mockIr（与 job 中 IR 完全一致）
     return res.status(200).json({
@@ -315,7 +316,15 @@ export default async function handler(req, res) {
           datasheetSha256: docSha,
           idempotencyKey: req.headers?.['idempotency-key'] || null, operation: 'extract'
         });
-        return { jobId: job.jobId, revision: job.revision, packages: ir.packages, pinsets: ir.pinsets, figures: ir.figures };
+        // item 9：幂等复用返回既有 Job 时，**所有字段必须来自 job.ir**，
+        // 不得把这次新提取生成的随机稳定 ID 返回给客户端。
+        return {
+          jobId: job.jobId, revision: job.revision,
+          part: job.ir.part,
+          packages: job.ir.packages, pinsets: job.ir.pinsets, figures: job.ir.figures,
+          state: job.ir.lifecycle?.state || 'extracted',
+          reused: job.ir !== ir
+        };
       })()),
       pdfToken: uploaded ? null : signPdfToken(v.url), // 供前端图区裁剪经受控端点取回
       meta: {
@@ -390,6 +399,23 @@ function withStableIds(ir, { documentSha256 = null } = {}) {
     }
     return { ...p, packageId: p.packageId || `pkg_${i + 1}_${randomUUID().slice(0, 8)}`, evidence: anchors };
   });
+  // item 5：为每个管脚的 number/name/type/description 建立字段级证据锚点
+  out.pinsets = (ir.pinsets || []).map((ps) => ({
+    ...ps,
+    normalizedPins: (ps.normalizedPins || ps.pins || []).map((pin) => ({
+      ...pin,
+      evidence: pin.evidence || Object.fromEntries(['number', 'name', 'type', 'description'].map((f) => [f, makeAnchor({
+        field: `pin.${f}`,
+        sourceType: pin.sourcePage ? SOURCE_TYPE.DATASHEET_TABLE : SOURCE_TYPE.UNVERIFIED,
+        documentSha256, page: pin.sourcePage || null,
+        bbox: pin.sourceBbox || null,
+        quotedText: `${pin.rawNumber ?? pin.number} ${pin.rawName ?? pin.name}`,
+        extractor: 'pin-table-parser', extractorVersion: '0.8.6'
+      })]))
+    })),
+    pins: undefined
+  })).map((ps) => ({ ...ps, pins: ps.normalizedPins }));
+
   out.figures = (ir.figures || []).map((f, i) => ({
     ...f,
     figureId: f.figureId || `fig_${i + 1}_${randomUUID().slice(0, 8)}`,

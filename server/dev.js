@@ -3,24 +3,31 @@ import express from 'express';
 import extractHandler from '../api/extract.js';
 import generateHandler from '../api/generate.js';
 import lifecycleHandler from '../api/lifecycle.js';
-import fetchPdfEdge from '../api/fetch-pdf.js';
+import figureUploadHandler from '../api/figure-upload.js';
+import fetchPdfHandler from '../api/fetch-pdf.js';
 
 const app = express();
 app.use(express.json({ limit: '8mb' }));
 
 app.all('/api/extract', (req, res) => extractHandler(req, res));
+app.all('/api/figure-upload', (req, res) => figureUploadHandler(req, res));
 app.all('/api/lifecycle', (req, res) => lifecycleHandler(req, res));
 app.all('/api/generate', (req, res) => generateHandler(req, res));
 
-// Edge 风格 handler（Request → Response）适配到 Express
-app.get('/api/fetch-pdf', async (req, res) => {
-  const url = new URL(req.originalUrl, `http://localhost:${process.env.PORT || 3001}`);
-  const response = await fetchPdfEdge(new Request(url.toString()));
-  res.status(response.status);
-  response.headers.forEach((v, k) => res.setHeader(k, v));
-  const buf = Buffer.from(await response.arrayBuffer());
-  res.end(buf);
-});
+// v0.8.6 item 11：fetch-pdf 自 v0.8.1 起已是 Node 风格 handler（req, res），
+// 此前仍按 Edge 的 Request→Response 方式调用，本地 PDF 渲染（图集缩略图）必然失败。
+app.all('/api/fetch-pdf', (req, res) => fetchPdfHandler(req, res));
+
+// item 10：测试专用 —— 允许 E2E 切换服务端 Stub（仅 AUTH_MODE=dev 时启用）
+if (process.env.AUTH_MODE === 'dev') {
+  app.post('/api/__test-env', (req, res) => {
+    for (const [k, v] of Object.entries(req.body || {})) {
+      if (!/^(MOCK_MODE|GEMINI_API_KEY|GEMINI_STUB|OCR_STUB|PDF_PARSER)$/.test(k)) continue;
+      if (v === '' || v === null) delete process.env[k]; else process.env[k] = String(v);
+    }
+    res.json({ ok: true, env: { MOCK_MODE: process.env.MOCK_MODE || null, GEMINI_STUB: process.env.GEMINI_STUB ? 'set' : null } });
+  });
+}
 
 const port = Number(process.env.PORT || 3001);
 app.listen(port, () => {

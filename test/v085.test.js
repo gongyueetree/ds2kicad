@@ -146,19 +146,19 @@ test('反例5：状态机 —— review/approve/publish 为独立 API 且权限�
   const ex = await extractViaHandler();
   const jobId = ex.data.jobId;
   // publisher 直接 publish（未 approve）→ 409
-  const early = await call('/api/lifecycle', { jobId, action: 'publish', assets: ['symbol'], reason: '尝试' }, PUBLISHER());
+  const early = await call('/api/lifecycle', { jobId, action: 'publish', assets: [`symbol:${ex.data.pinsets[0].id}`], reason: '尝试', expectedRevision: ex.data.revision }, PUBLISHER());
   assert.equal(early.status, 409, JSON.stringify(early.data));
   // reviewer 执行 review
-  const rev = await call('/api/lifecycle', { jobId, action: 'review', reason: '已核对手册' }, REVIEWER());
+  const rev = await call('/api/lifecycle', { jobId, action: 'review', reason: '已核对手册', expectedRevision: ex.data.revision }, REVIEWER());
   assert.equal(rev.status, 200, JSON.stringify(rev.data));
   assert.equal(rev.data.state, 'reviewed');
   assert.equal(rev.data.lifecycle.reviewedBy.sub, 'u1');
   // publisher 无 reviewer 权限时不能 approve（publisher 隐含 reviewer，故此处用纯 editor 验证）
-  const editorApprove = await call('/api/lifecycle', { jobId, action: 'approve', assets: ['symbol'], reason: 'x' },
+  const editorApprove = await call('/api/lifecycle', { jobId, action: 'approve', assets: [`symbol:${ex.data.pinsets[0].id}`], reason: 'x', expectedRevision: rev.data.revision },
     sess({ sub: 'u1', tenantId: 'smoke-tenant', roles: ['editor'] }));
   assert.equal(editorApprove.status, 403);
   // mock 数据全局阻断 → approve 任何资产都应 409（闸门未通过）
-  const approveMock = await call('/api/lifecycle', { jobId, action: 'approve', assets: ['symbol'], reason: '批准' }, REVIEWER());
+  const approveMock = await call('/api/lifecycle', { jobId, action: 'approve', assets: [`symbol:${ex.data.pinsets[0].id}`], reason: '批准', expectedRevision: rev.data.revision }, REVIEWER());
   assert.equal(approveMock.status, 409, JSON.stringify(approveMock.data));
   assert.equal(approveMock.data.code, 'asset_not_promotable');
 });
@@ -169,8 +169,9 @@ test('反例6：canPublish 依赖持久化批准状态，不只看角色', async
   const r = await call('/api/generate', { jobId, patch: {} }, PUBLISHER());
   assert.equal(r.status, 200);
   assert.equal(typeof r.data.canPublish, 'object');
-  // 未 approve → 即便是 publisher 也全 false
-  assert.deepEqual(r.data.canPublish, { symbol: false, footprint: false, model3d: false, figures: false });
+  // v0.8.6：资产版本键；未 approve → 即便 publisher 也全 false
+  assert.ok(Object.keys(r.data.canPublish).every((k) => k.includes(':')));
+  assert.ok(Object.values(r.data.canPublish).every((v) => v === false));
 });
 
 test('反例7：删除 Evidence 不得反而可晋升（EvidenceGate fail closed）', async () => {

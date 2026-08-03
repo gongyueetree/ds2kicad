@@ -343,9 +343,12 @@ test('item 11：canPublish 为资产级且需要 publisher 角色', async () => 
   ir.figures[0].confirmed = true;
   const job = store.create({ ir, tenantId: 't1', ownerId: 'u1' });
   const asReviewer = await post({ jobId: job.jobId, patch: {} }, sess({ sub: 'u1', tenantId: 't1', roles: ['reviewer'] }));
-  assert.equal(typeof asReviewer.data.canPublish, 'object', 'canPublish 必须是资产级对象');
-  assert.equal(asReviewer.data.canPublish.symbol, false, 'reviewer 无发布权');
+  // v0.8.6：canPublish 键升级为资产版本键（symbol:<pinsetId> / footprint:<packageId> …）
+  assert.equal(typeof asReviewer.data.canPublish, 'object');
+  assert.ok(Object.keys(asReviewer.data.canPublish).every((k) => k.includes(':')), JSON.stringify(Object.keys(asReviewer.data.canPublish)));
+  assert.ok(Object.values(asReviewer.data.canPublish).every((v) => v === false), 'reviewer 无发布权');
   // v0.8.5 item 7/11：canPublish 依赖**持久化批准状态**，未 approve 时即便 publisher 也全 false
   const asPublisher = await post({ jobId: job.jobId, patch: {} }, sess({ sub: 'u1', tenantId: 't1', roles: ['publisher'] }));
-  assert.deepEqual(asPublisher.data.canPublish, { symbol: false, footprint: false, model3d: false, figures: false });
+  // 未 approve 时即便 publisher 也全 false（v0.8.6 依赖持久化批准 + revision/irHash 绑定）
+  assert.ok(Object.values(asPublisher.data.canPublish).every((v) => v === false), JSON.stringify(asPublisher.data.canPublish));
 });
