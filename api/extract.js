@@ -6,8 +6,10 @@
 import { validatePdfUrl, sanitizePins, sanitizePinsDetailed, sanitizePinsets, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
 import { extractWithGemini } from '../lib/gemini.js';
 import { signPdfToken } from '../lib/pdftoken.js';
-import { sealJob } from '../lib/jobstore.js';
+import { getJobStore, sha256 } from '../lib/jobstore.js';
 import { authenticate } from '../lib/auth.js';
+import { randomUUID } from 'node:crypto';
+import { makeAnchor, SOURCE_TYPE } from '../lib/evidence.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
 
 export default async function handler(req, res) {
@@ -55,22 +57,33 @@ export default async function handler(req, res) {
     });
   }
   if (mockAllowed) {
-    const mockIr = {
+    const mockIr = withStableIds({
       part: MOCK_TMUXL27518.part,
-      packages: MOCK_TMUXL27518.packages,
-      pinsets: MOCK_TMUXL27518.pinsets,
+      packages: MOCK_TMUXL27518.packages.map((p) => sanitizePackage(p)),
+      pinsets: sanitizePinsets(MOCK_TMUXL27518.pinsets, []),
       figures: MOCK_TMUXL27518.figures,
       mock: true,                       // 服务端权威，客户端无法删除
-      tenantId: session.tenantId,
       pdfUrl: v.url
-    };
-    const sealed = sealJob(mockIr);
+    });
+    const store0 = await getJobStore();
+    const job = await store0.create({
+      ir: mockIr, tenantId: session.tenantId, ownerId: session.sub,
+      datasheetSha256: uploadedBuf ? sha256(uploadedBuf) : null,
+      idempotencyKey: req.headers?.['idempotency-key'] || null, operation: 'extract'
+    });
+    // item 4：不再展开 MOCK_TMUXL27518 后又被后续键覆盖 —— 显式构造响应，
+    // packages/pinsets/figures 一律来自已带稳定 ID 的 mockIr（与 job 中 IR 完全一致）
     return res.status(200).json({
-      ...MOCK_TMUXL27518,
-      jobId: sealed.jobId,
+      part: job.ir.part,
+      recommendedPackageIndex: MOCK_TMUXL27518.recommendedPackageIndex ?? 0,
+      pins: job.ir.pinsets[0]?.normalizedPins || [],
+      jobId: job.jobId,
+      revision: job.revision,
+      packages: job.ir.packages,      // 唯一 packages 字段，直接取自持久化 Job IR
+      pinsets: job.ir.pinsets,
+      figures: job.ir.figures,
       mock: true,
       non_promotable: true,
-      packages: MOCK_TMUXL27518.packages.map((p) => ({ ...p, family: guessFamily(p.type) })),
       pdfToken: uploaded ? null : signPdfToken(v.url), // item 9：mock 响应同样提供 PDF 访问方式
       meta: { mode: 'mock', reason: 'MOCK_MODE=1', pdfUrl: v.url }
     });
@@ -115,6 +128,8 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: `数据手册下载失败: ${e.message}${cnTip}` });
   }
 
+  const docSha = sha256(pdfBuf); // item 10：证据锚点的文档标识
+
   // ── 阶段 1：确定性程序化解析（零 AI 成本）──────────────────────────────
   // AI 只在程序化拿不到时按需介入；每个字段带来源溯源（parser / gemini）。
   let det = { textOk: false, part: null, pins: [], pinsets: [], pinConfidence: 'low', figures: [], relevantPages: [], assignPinsets: null };
@@ -133,22 +148,30 @@ export default async function handler(req, res) {
           docProfile = { pdfType: 'unknown', error: e.message };
         }
       }
-      var ocrResult = null; // item 12：OCR 路由结果（含 mustKeepPages）
+
       const { findPartInfo, parsePinTable, findFigures, selectRelevantPages, assignPinsets } = await import('../lib/heuristics.js');
-      const { pages } = await extractTextPages(pdfBuf);
+      let { pages } = await extractTextPages(pdfBuf);
+      let ocrInfo = null;
+      // item 11：classify → pagesNeedingOcr → OCR Worker → mergedPages → 重跑程序解析。
+      // 全扫描 PDF（文本层几乎为空）也必须进 OCR Worker，不能直接放弃程序解析。
+      const sparseText = pages.reduce((n, p) => n + p.lines.length, 0) <= 20;
+      const needOcrPages = docProfile?.pagesNeedingOcr?.length
+        ? docProfile.pagesNeedingOcr
+        : (sparseText ? pages.map((p) => p.page) : []);
+      if (needOcrPages.length) {
+        const { routeOcr } = await import('../lib/ocr/router.js');
+        const r = await routeOcr(pdfBuf, { profile: { pagesNeedingOcr: needOcrPages }, textPages: pages });
+        ocrInfo = { status: r.status, ocrPages: r.ocrPages, mustKeepPages: r.mustKeepPages, note: r.note };
+        pages = r.mergedPages;            // 合并后的页面重新参与解析
+      }
       const totalText = pages.reduce((n, p) => n + p.lines.length, 0);
-      if (totalText > 20) { // 有文本层（非纯扫描版）
+      if (totalText > 20) { // 有文本层（原生或 OCR 合并后）
         const pi = findPartInfo(pages, v.url);
         const pt = parsePinTable(pages);
         const figs = findFigures(pages);
-        // item 12：需 OCR 的页面走 OCR Worker；无 Worker 时也绝不丢弃这些页
-        if (docProfile?.pagesNeedingOcr?.length) {
-          const { routeOcr } = await import('../lib/ocr/router.js');
-          ocrResult = await routeOcr(pdfBuf, { profile: docProfile, textPages: pages });
-        }
         det = {
           textOk: true,
-          ocr: ocrResult ? { status: ocrResult.status, ocrPages: ocrResult.ocrPages, mustKeepPages: ocrResult.mustKeepPages, note: ocrResult.note } : null,
+          ocr: ocrInfo,
           textPages: pages.map((pg) => ({ page: pg.page, text: pg.lines.map((l) => l.text).join('\n').slice(0, 4000) })),
           part: pi.ok ? pi.part : null,
           pins: pt.pins,
@@ -277,14 +300,23 @@ export default async function handler(req, res) {
         pins: need.pins ? 'gemini' : 'parser',
         figures: need.figures ? 'gemini' : 'parser'
       },
-      jobId: sealJob({
-        part, packages, pinsets, figures,
-        recommendedPackageIndex: idx,
-        mock: false,
-        pinsReviewRequired: pinsReviewRequired,
-        tenantId: session.tenantId,
-        pdfUrl: v.url
-      }).jobId,
+      ...(await (async () => {
+        const store = await getJobStore();     // item 1：显式获取，禁止依赖外层未定义变量
+        const ir = withStableIds({
+          part, packages, pinsets, figures,
+          recommendedPackageIndex: idx,
+          mock: false,
+          pinsReviewRequired,
+          pdfUrl: v.url,
+          documentSha256: docSha
+        }, { documentSha256: docSha });
+        const job = await store.create({
+          ir, tenantId: session.tenantId, ownerId: session.sub,
+          datasheetSha256: docSha,
+          idempotencyKey: req.headers?.['idempotency-key'] || null, operation: 'extract'
+        });
+        return { jobId: job.jobId, revision: job.revision, packages: ir.packages, pinsets: ir.pinsets, figures: ir.figures };
+      })()),
       pdfToken: uploaded ? null : signPdfToken(v.url), // 供前端图区裁剪经受控端点取回
       meta: {
         mode: 'live',
@@ -301,22 +333,31 @@ export default async function handler(req, res) {
   } catch (e) {
     // Gemini 整体失败：若程序化已拿到管脚高置信结果，降级返回（封装参数留给用户手填）
     if (det.pinConfidence === 'high') {
-      return res.status(200).json({
-        mock: false,
+      // item 1：degraded 也必须先落库，再从 Job IR 回读，保证响应与库内 IR 逐字段一致
+      const degradedIr = withStableIds({
         part: det.part || { mpn: 'UNKNOWN', manufacturer: '', title: '', description_zh: '' },
         packages: [sanitizePackage({ pinCount: det.pins.length })],
-        recommendedPackageIndex: 0,
-        pins: sanitizePins(det.pins),
         pinsets: sanitizePinsets(det.pinsets, det.pins),
         figures: (await import('../lib/figfilter.js')).filterFigures(sanitizeFigures(det.figures), { pkgCount: 1 }),
-        jobId: sealJob({
-          part: det.part || { mpn: 'UNKNOWN' },
-          packages: [sanitizePackage({ pinCount: det.pins.length })],
-          pinsets: sanitizePinsets(det.pinsets, det.pins),
-          figures: sanitizeFigures(det.figures),
-          mock: false, degraded: true, tenantId: session.tenantId, pdfUrl: v.url
-        }).jobId,
-        pdfToken: uploaded ? null : signPdfToken(v.url), // item 9：degraded 响应同样提供 PDF 访问方式
+        mock: false, degraded: true, pdfUrl: v.url, documentSha256: docSha
+      }, { documentSha256: docSha });
+      const dStore = await getJobStore();
+      const dJob = await dStore.create({
+        ir: degradedIr, tenantId: session.tenantId, ownerId: session.sub,
+        datasheetSha256: docSha, operation: 'extract'
+      });
+      return res.status(200).json({
+        mock: false,
+        part: dJob.ir.part,
+        packages: dJob.ir.packages,
+        recommendedPackageIndex: 0,
+        pins: dJob.ir.pinsets[0]?.normalizedPins || [],
+        pinsets: dJob.ir.pinsets,
+        figures: dJob.ir.figures,
+        jobId: dJob.jobId,
+        revision: dJob.revision,
+        status: dJob.ir.status || 'extracted',
+        pdfToken: uploaded ? null : signPdfToken(v.url),
         sources: { part: 'parser', packages: 'fallback', pins: 'parser', figures: 'parser' },
         meta: { mode: 'degraded', warning: `AI 不可用（${e.message}），封装尺寸为默认值，请手工核对`, pdfUrl: v.url, pdfBytes: pdfBuf.length }
       });
@@ -326,6 +367,40 @@ export default async function handler(req, res) {
 }
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+/** item 3/10：为 packages / figures 赋稳定 ID（禁止用名称作主键），并附字段级证据锚点。
+ *  注意：不因"字段里有数字"就标记 datasheet —— 只有带页码定位的才可能是 datasheet 级证据。 */
+function withStableIds(ir, { documentSha256 = null } = {}) {
+  const out = { ...ir };
+  out.packages = (ir.packages || []).map((p, i) => {
+    const page = Array.isArray(p.sourcePages) && p.sourcePages.length ? p.sourcePages[0] : null;
+    const anchors = {};
+    for (const [field, prov] of Object.entries(p.fieldProvenance || {})) {
+      const st = prov.source === 'datasheet'
+        ? (page ? SOURCE_TYPE.DATASHEET_DRAWING : SOURCE_TYPE.UNVERIFIED)
+        : prov.source === 'reviewer' ? SOURCE_TYPE.REVIEWER
+        : prov.source === 'clamped' || prov.source === 'invalid' ? SOURCE_TYPE.UNVERIFIED
+        : prov.source === 'missing' ? SOURCE_TYPE.DEFAULT
+        : SOURCE_TYPE.UNVERIFIED;
+      anchors[field] = makeAnchor({
+        field, sourceType: st, documentSha256, page,
+        extractor: 'gemini+validate', extractorVersion: '0.8.3',
+        confidence: prov.source === 'datasheet' ? 0.8 : null
+      });
+    }
+    return { ...p, packageId: p.packageId || `pkg_${i + 1}_${randomUUID().slice(0, 8)}`, evidence: anchors };
+  });
+  out.figures = (ir.figures || []).map((f, i) => ({
+    ...f,
+    figureId: f.figureId || `fig_${i + 1}_${randomUUID().slice(0, 8)}`,
+    evidence: makeAnchor({
+      field: 'figure', sourceType: f.page ? SOURCE_TYPE.DATASHEET_DRAWING : SOURCE_TYPE.UNVERIFIED,
+      documentSha256, page: f.page, bbox: f.bbox, quotedText: f.title,
+      extractor: 'figfilter', extractorVersion: '0.8.3'
+    })
+  }));
+  return out;
+}
 
 /** P0-1：切片 PDF 的派生页码 → 原文页码反向映射（页码是证据，映射不了就删除引用，绝不带错误页码出门） */
 function remapDerivedPages(raw, pageMap) {

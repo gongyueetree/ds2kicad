@@ -86,9 +86,7 @@ export default function PackageForm({ packages, selectedIndex, pkg, pinsets = []
       )}
       <label className="pkg-select">
         封装家族（决定焊盘算法）：
-        <select value={pkg.family} onChange={(e) => onChange({ ...pkg, family: e.target.value })}>
-          {PACKAGE_TYPES.map((f) => <option key={f} value={f}>{FAMILY_LABEL[f]}</option>)}
-        </select>
+        <span className="src-badge src-parser">{FAMILY_LABEL[pkg.family] || pkg.family}（服务端判定，只读）</span>
       </label>
       <div className="pkg-grid">
         <label>封装名称<input value={pkg.name} onChange={(e) => onChange({ ...pkg, name: e.target.value })} /></label>

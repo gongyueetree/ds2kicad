@@ -45,8 +45,11 @@ test('P0-2：missingFields 留痕 → blocked / placeholder / nonPromotable 语�
   // 全齐且无先验修正 → 可晋升
   // v0.8.2：即使字段齐全，无手册 land pattern + 参数化 WRL 仍不可晋升（真实性要求）
   const full = sanitizePackage({ name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6.0, height: 1.75 });
-  const r3 = generateBundle({ part: { mpn: 'X' }, items: [{ pkg: full, pins: pins8 }] });
-  assert.deepEqual(r3.reasons.sort(), ['approximate_parametric_3d_not_vendor_step', 'land_pattern_derived_not_from_datasheet'].sort());
+  const r3 = generateBundle({ part: { mpn: 'X' }, sessionAuthenticated: true, pinsReviewRequired: false, items: [{ pkg: full, pins: pins8 }] });
+  // v0.8.5 item 5：无字段级 EvidenceAnchor 时 fail closed，故额外含 field_evidence_unverified
+  assert.ok(r3.reasons.includes('approximate_parametric_3d_not_vendor_step'));
+  assert.ok(r3.reasons.includes('land_pattern_derived_not_from_datasheet'));
+  assert.ok(r3.reasons.includes('field_evidence_unverified'));
   assert.ok(!r3.reasons.includes('missing_required_geometry'), '字段齐全不应报缺失');
 });
 

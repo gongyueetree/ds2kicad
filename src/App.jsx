@@ -95,7 +95,11 @@ export default function App() {
         pinsetId: validIds.has(p.pinsetId) ? p.pinsetId : sets[0].id,
         include: true
       }));
-      setExtract({ ...data, pdfUrl: u });
+      setExtract({
+        ...data, pdfUrl: u,
+        // item 2：保存服务端原始快照，用于计算 Patch 差异
+        __original: structuredClone({ part: data.part, packages, pinsets: sets, figures: data.figures || [] })
+      });
       setPart(data.part);
       setPinsets(sets);
       setPkgs(packages);
@@ -132,16 +136,110 @@ export default function App() {
     setError('');
     try {
       // item 1：只提交 jobId + 审核 Patch；part/pins/mock/provenance 由服务端从 jobId 恢复
-      const packageEdits = {};
-      for (const p of included) {
-        const edits = {};
-        for (const [k, v] of Object.entries(p.fieldEdits || {})) edits[k] = v;
-        if (Object.keys(edits).length) packageEdits[p.name] = edits;
+      // v0.8.4 item 2：页面上所有可编辑内容都必须进入 Patch（此前只提交了封装数值）
+      const orig = extract.__original || {};
+      const partPatch = {};
+      for (const k of ['mpn', 'manufacturer', 'title', 'description_zh']) {
+        if ((part?.[k] ?? '') !== (orig.part?.[k] ?? '')) partPatch[k] = part[k];
+      }
+      const pkgPatches = [];
+      for (const p of pkgs) {
+        const o = (orig.packages || []).find((x) => x.packageId === p.packageId) || {};
+        const entry = { packageId: p.packageId };
+        let touched = false;
+        // item 2：可选尺寸支持置 null（leadWidth/EP）
+        for (const [k, v] of Object.entries(p.fieldEdits || {})) { entry[k] = v === '' ? null : v; touched = true; }
+        if ((p.name ?? '') !== (o.name ?? '')) { entry.name = p.name; touched = true; }
+        if ((p.pinsetId ?? '') !== (o.pinsetId ?? '')) { entry.pinsetId = p.pinsetId; touched = true; }
+        // item 2：landPattern 支持整体置 null（清除推荐焊盘）
+        if (p.landPattern === null && o.landPattern) { entry.landPattern = null; touched = true; }
+        else {
+          const lpDiff = {};
+          for (const k of ['padW', 'padL', 'rowSpan', 'holeDia']) {
+            const a = p.landPattern?.[k], b = o.landPattern?.[k];
+            if (a !== undefined && a !== null && Number(a) !== Number(b ?? NaN)) lpDiff[k] = Number(a);
+          }
+          if (Object.keys(lpDiff).length) { entry.landPattern = lpDiff; touched = true; }
+        }
+        if (touched) pkgPatches.push(entry);
+      }
+      // item 2：管脚新增 → addPins、删除 → removePins、修改 → 稳定 pinId
+      const pinsetPatches = [];
+      for (const ps of pinsets) {
+        const o = (orig.pinsets || []).find((x) => x.id === ps.id);
+        if (!o) continue;
+        const origPins = o.normalizedPins || o.pins || [];
+        const curPins = ps.normalizedPins || ps.pins || [];
+        const pinPatches = [], addPins = [], removePins = [];
+        for (const pin of curPins) {
+          const op = origPins.find((x) => x.pinId === pin.pinId);
+          if (!op) {                       // 页面新增的管脚
+            addPins.push({ number: String(pin.number), name: pin.name, type: pin.type, description: pin.description || '', reason: '页面新增' });
+            continue;
+          }
+          const d = { pinId: pin.pinId };
+          let t = false;
+          for (const k of ['name', 'type', 'description', 'number']) {
+            if ((pin[k] ?? '') !== (op[k] ?? '')) { d[k] = pin[k]; t = true; }
+          }
+          if (t) pinPatches.push(d);
+        }
+        for (const op of origPins) {       // 页面删除的管脚
+          if (!curPins.some((p) => p.pinId === op.pinId)) removePins.push({ pinId: op.pinId, reason: '页面删除' });
+        }
+        if (pinPatches.length || addPins.length || removePins.length) {
+          pinsetPatches.push({
+            pinsetId: ps.id,
+            ...(pinPatches.length ? { pins: pinPatches } : {}),
+            ...(addPins.length ? { addPins } : {}),
+            ...(removePins.length ? { removePins } : {})
+          });
+        }
+      }
+      // item 2：只提交真正变化的 Figures
+      const figPatches = [];
+      for (const f of figures) {
+        if (!f.figureId) continue;
+        const o = (orig.figures || []).find((x) => x.figureId === f.figureId);
+        if (!o) continue;
+        const d = { figureId: f.figureId };
+        let t = false;
+        if (!!f.confirmed !== !!o.confirmed) { d.confirmed = !!f.confirmed; t = true; }
+        if (JSON.stringify(f.bbox) !== JSON.stringify(o.bbox)) { d.bbox = f.bbox; t = true; }
+        if (Number(f.page) !== Number(o.page)) { d.page = Number(f.page); t = true; }
+        if (f.kind !== o.kind) { d.kind = f.kind; t = true; }
+        if ((f.title ?? '') !== (o.title ?? '')) { d.title = f.title; t = true; }
+        if (t) figPatches.push(d);
       }
       const result = await apiGenerate({
         jobId: extract.jobId,
-        patch: { includePackages: included.map((p) => p.name), packageEdits }
+        patch: {
+          schemaVersion: 'ds2kicad.review-patch.v1',
+          expectedRevision: extract.revision,      // item 2：每次携带乐观锁版本
+          includePackageIds: included.map((p) => p.packageId),
+          ...(Object.keys(partPatch).length ? { part: partPatch } : {}),
+          ...(pkgPatches.length ? { packages: pkgPatches } : {}),
+          ...(pinsetPatches.length ? { pinsets: pinsetPatches } : {}),
+          ...(figPatches.length ? { figures: figPatches } : {})
+        }
       });
+      // item 2：用服务端 reviewedIr 回写页面，保证页面与权威 IR 一致
+      if (result.reviewedIr) {
+        const ri = result.reviewedIr;
+        setPart(ri.part);
+        setPinsets(ri.pinsets || []);
+        setPkgs((ri.packages || []).map((p) => {
+          const prev = pkgs.find((x) => x.packageId === p.packageId);
+          return { ...p, include: prev ? prev.include : true, fieldEdits: {} };
+        }));
+        setFigures(ri.figures || []);
+        setExtract((e) => ({
+          ...e,
+          revision: result.revision,           // 回写新版本号，供下次 expectedRevision 使用
+          state: result.state,
+          __original: structuredClone({ part: ri.part, packages: ri.packages, pinsets: ri.pinsets, figures: ri.figures })
+        }));
+      }
       setGenResult(result);
       setPhase('confirm');
       setTimeout(() => document.getElementById('preview-anchor')?.scrollIntoView({ behavior: 'smooth' }), 100);

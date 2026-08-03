@@ -3,6 +3,14 @@ import { useState } from 'react';
 import JSZip from 'jszip';
 import { exportFigures } from './FigureEditor.jsx';
 
+/** item 8：前端二次防线 —— 拒绝路径穿越/分隔符/控制字符 */
+function safePath(p) {
+  return String(p ?? 'file')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/[\\/]/g, '_')
+    .replace(/\.{2,}/g, '_') || 'file';
+}
+
 function download(name, content, mime = 'text/plain') {
   const blob = content instanceof Blob ? content : new Blob([content], { type: mime });
   const a = document.createElement('a');
@@ -19,6 +27,9 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
   if (!bundle) return null;
   const okFigs = confirmed.figures.filter((f) => f.confirmed);
 
+  // v0.8.3 item 4：正式 Part Bundle 由服务端基于 reviewed IR 生成；
+  // 前端只负责下载与图片附加，不再用本地 confirmed 状态拼装权威内容。
+  const serverBundleJson = () => JSON.stringify(bundle.partBundle ?? { error: 'server_bundle_missing' }, null, 2);
   const buildBundleJson = (figuresWithImages) => JSON.stringify({
     schema: 'ds2kicad.part-bundle.v2',
     mock: !!bundle.mock,                          // 演示数据标志随 bundle 落到 part-bundle
@@ -43,11 +54,19 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
     setBusy('正在打包…');
     try {
       const zip = new JSZip();
-      zip.file(bundle.names.kicadSym, bundle.files.kicadSym);
-      for (const s of bundle.symbols) zip.file(`${s.name}.lib`, s.legacyLib);
+      // item 8：ZIP 条目路径与内容一律取服务端 manifest/assetFiles（已做路径穿越与注入清洗），
+      // 前端不再用 bundle.names.* 直接拼路径
+      const serverFiles = bundle.assetFiles || [];
+      const contentByPath = new Map();
+      contentByPath.set(safePath(bundle.names.kicadSym), bundle.files.kicadSym);
+      for (const s of bundle.symbols) contentByPath.set(safePath(`${s.name}.lib`), s.legacyLib);
       for (const it of bundle.items) {
-        if (it.files.kicadMod) zip.file(it.names.kicadMod, it.files.kicadMod);
-        if (it.files.wrl) zip.file(it.names.wrl, it.files.wrl);
+        if (it.files.kicadMod) contentByPath.set(safePath(it.names.kicadMod), it.files.kicadMod);
+        if (it.files.wrl) contentByPath.set(safePath(it.names.wrl), it.files.wrl);
+      }
+      for (const f of serverFiles) {
+        const content = contentByPath.get(f.path);
+        if (content !== undefined) zip.file(f.path, content);   // 只写服务端确认过的路径
       }
       try {
         const figs = await exportFigures(pdfUrl, okFigs);
@@ -60,9 +79,10 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
       } catch (e) {
         console.warn('图片导出失败，ZIP 中省略图片', e);
       }
-      zip.file('part-bundle.json', buildBundleJson(null));
+      zip.file('part-bundle.json', serverBundleJson());
+      if (bundle.manifest) zip.file('manifest.json', JSON.stringify(bundle.manifest, null, 2));
       const blob = await zip.generateAsync({ type: 'blob' });
-      download(`${confirmed.part.mpn || 'part'}_kicad_bundle.zip`, blob, 'application/zip');
+      download(safePath(`${confirmed.part?.mpn || 'part'}_kicad_bundle.zip`), blob, 'application/zip');
     } finally {
       setBusy('');
     }
@@ -79,10 +99,11 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
         mock: !!bundle.mock,
         nonPromotable: !!bundle.nonPromotable,
         promotionBlockReasons: bundle.reasons || [],
-        bundle: JSON.parse(buildBundleJson(figs)),
+        bundle: bundle.partBundle ?? null,
+        // item 8：postMessage 只传服务端确认的文件清单（路径已清洗）+ 内容
         files: {
-          kicadSym: bundle.files.kicadSym,
-          items: bundle.items.map((it) => ({ pkgName: it.pkgName, ...it.files, ...it.names }))
+          manifest: bundle.manifest || null,
+          entries: (bundle.assetFiles || []).map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes }))
         }
       };
       // 出站必须精确 targetOrigin，且必须回带握手 nonce/jobId；无会话则拒发（绝不使用 '*'）
@@ -103,16 +124,17 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
   return (
     <div className="export-panel">
       <div className="export-row">
-        <button className="btn-secondary" onClick={() => download(bundle.names.kicadSym, bundle.files.kicadSym)}>
+        <button className="btn-secondary" onClick={() => download(safePath(bundle.names.kicadSym), bundle.files.kicadSym)}>
           ⬇ {bundle.names.kicadSym}（{bundle.symbols.length} 符号）
         </button>
         {bundle.items.map((it, i) => it.files.kicadMod && (
           <span key={i} style={{ display: 'inline-flex', gap: 8 }}>
-            <button className="btn-secondary" onClick={() => download(it.names.kicadMod, it.files.kicadMod)}>⬇ {it.names.kicadMod}</button>
-            <button className="btn-secondary" onClick={() => download(it.names.wrl, it.files.wrl)}>⬇ {it.names.wrl}</button>
+            <button className="btn-secondary" onClick={() => download(safePath(it.names.kicadMod), it.files.kicadMod)}>⬇ {it.names.kicadMod}</button>
+            <button className="btn-secondary" onClick={() => download(safePath(it.names.wrl), it.files.wrl)}>⬇ {it.names.wrl}</button>
           </span>
         ))}
-        <button className="btn-secondary" onClick={() => download('part-bundle.json', buildBundleJson(null), 'application/json')}>⬇ part-bundle.json</button>
+        <button className="btn-secondary" onClick={() => download('part-bundle.json', serverBundleJson(), 'application/json')}>⬇ part-bundle.json（服务端权威）</button>
+        {bundle.manifest && <button className="btn-secondary" onClick={() => download('manifest.json', JSON.stringify(bundle.manifest, null, 2), 'application/json')}>⬇ manifest.json</button>}
       </div>
       <div className="export-row">
         <button className="btn-primary" onClick={exportZip}>📦 打包下载 ZIP（全部封装 + 截图 PNG）</button>
@@ -120,8 +142,18 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
       </div>
       <p className="hint">图区：已确认 {okFigs.length} / {confirmed.figures.length} 张将随导出打包{okFigs.length < confirmed.figures.length ? '（未确认的不导出，请回 ④ 确认）' : ''}</p>
       <div className={bundle.nonPromotable ? 'warn-box' : 'hint'} style={{ marginTop: 10 }}>
+        {bundle.assetPromotion && (
+          <p>
+            资产级晋升：
+            {Object.entries(bundle.assetPromotion).map(([k, v]) => (
+              <span key={k} className={`src-badge ${v ? 'src-parser' : 'src-fallback'}`}>
+                {k} {v ? '可晋升' : '待复核'}{bundle.canPublish?.[k] ? ' · 可发布' : ''}
+              </span>
+            ))}
+          </p>
+        )}
         <p>
-          <b>晋升状态：{bundle.nonPromotable ? '不可晋升为正式资产' : '可晋升'}</b>
+          <b>整体状态：{bundle.nonPromotable ? '存在待复核资产' : '全部可晋升'}</b>
           {bundle.reviewer ? `　审核者：${bundle.reviewer.name}` : '　（无已认证会话）'}
         </p>
         {(bundle.reasons || []).map((r, i) => <p key={i}>· {r}</p>)}

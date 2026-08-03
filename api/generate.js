@@ -1,18 +1,15 @@
-// api/generate.js — v0.8.2 item 1：只接受 { jobId, patch }。
-// 权威数据（part/packages/pinsets/mock/provenance/证据）一律从服务端密封的 jobId 恢复，
-// 客户端不能提交 part/items/mock/provenance —— 提交了也不会被采纳（显式报错）。
-// patch 仅允许对已知封装的白名单几何字段做人工修改，且署名来自已认证会话（非客户端字符串）。
-import { generateBundle } from '../lib/kicadgen/index.js';
+// api/generate.js — v0.8.5：POST { jobId, patch } → Canonical 流程 → 事务保存 → 完整产物。
+// item 3：响应 reviewedIr、数据库 IR、Part Bundle、KiCad 全部来自同一份 normalized IR；
+//         生成失败绝不修改 Job（先 run pipeline，成功后才 commit 事务）。
+// item 9：postMessage/导出所需的真实文件内容与短期下载令牌一并返回。
 import { setCors } from './extract.js';
-import { openJob } from '../lib/jobstore.js';
-import { authenticate } from '../lib/auth.js';
-import { sanitizePackage, applyReviewerEdit, sanitizePinsDetailed } from '../lib/validate.js';
+import { getJobStore } from '../lib/jobstore.js';
+import { authenticate, authorizeJobAccess, hasRole } from '../lib/auth.js';
+import { runCanonicalPipeline } from '../lib/canonical.js';
+import { transition, currentState, computeCanPublish, STATE } from '../lib/lifecycle.js';
+import { signAssetToken } from '../lib/assettoken.js';
 
-const PATCHABLE = new Set([
-  'pinCount', 'pitch', 'bodyLength', 'bodyWidth', 'height',
-  'leadSpan', 'leadLength', 'leadWidth', 'epLength', 'epWidth', 'rowSpan'
-]);
-const FORBIDDEN_CLIENT_FIELDS = ['part', 'items', 'pins', 'pinsets', 'packages', 'mock', 'provenance', 'fieldProvenance', 'nonPromotable', 'reviewer'];
+const FORBIDDEN_CLIENT_FIELDS = ['part', 'items', 'pins', 'pinsets', 'packages', 'mock', 'provenance', 'fieldProvenance', 'nonPromotable', 'reviewer', 'figures', 'ir', 'lifecycle'];
 
 export default async function handler(req, res) {
   setCors(res, req);
@@ -26,62 +23,80 @@ export default async function handler(req, res) {
   const body = req.body && typeof req.body === 'object' ? req.body : safeParse(req.body);
   if (!body) return res.status(422).json({ error: '请求体不是合法 JSON' });
 
-  // item 1：显式拒绝客户端提交权威数据（防止悄悄回到 v0.8.1 的可伪造模型）
   const offending = FORBIDDEN_CLIENT_FIELDS.filter((k) => body[k] !== undefined);
   if (offending.length) {
     return res.status(400).json({
-      error: `不接受客户端提交的权威字段：${offending.join(', ')}。请只提交 { jobId, patch }，权威数据由服务端从 jobId 恢复`,
+      error: `不接受客户端提交的权威字段：${offending.join(', ')}。请只提交 { jobId, patch }`,
       code: 'client_authoritative_fields_rejected'
     });
   }
 
-  const opened = openJob(body.jobId);
-  if (!opened.ok) return res.status(400).json({ error: opened.error, code: 'invalid_job' });
-  const ir = opened.job.ir;
+  const store = await getJobStore();
+  const got = await store.get(body.jobId);
+  if (!got.ok) return res.status(400).json({ error: got.error, code: got.code });
+  const job = got.job;
 
-  // 租户隔离：作业必须属于当前会话租户
-  if (ir.tenantId && session.authenticated && ir.tenantId !== session.tenantId) {
-    return res.status(403).json({ error: '作业不属于当前租户', code: 'tenant_mismatch' });
+  const patch = body.patch && typeof body.patch === 'object' && !Array.isArray(body.patch) ? body.patch : {};
+  const hasEdits = Object.keys(patch).some((k) => !['includePackageIds', 'schemaVersion', 'expectedRevision'].includes(k));
+  const az = authorizeJobAccess(session, job, hasEdits ? { requireRole: 'reviewer' } : {});
+  if (!az.ok) return res.status(az.status).json({ error: az.error, code: az.code });
+
+  // item 2：每次请求携带 expectedRevision（乐观锁）
+  if (patch.expectedRevision !== undefined && patch.expectedRevision !== job.revision) {
+    return res.status(409).json({ error: `版本冲突：当前 revision ${job.revision}`, code: 'revision_conflict', currentRevision: job.revision });
   }
 
-  try {
-    const patch = body.patch && typeof body.patch === 'object' ? body.patch : {};
-    const selected = Array.isArray(patch.includePackages) && patch.includePackages.length
-      ? patch.includePackages.map(String) : null;
-    const edits = patch.packageEdits && typeof patch.packageEdits === 'object' ? patch.packageEdits : {};
+  const canReview = hasRole(session, 'reviewer');
+  const result = runCanonicalPipeline({
+    job, patch, session,
+    includeIds: patch.includePackageIds,
+    markReviewed: canReview
+  });
+  if (!result.ok) {
+    return res.status(result.status).json({ error: result.error, code: result.code, ...(result.errors ? { errors: result.errors } : {}) });
+  }
 
-    const pinsetMap = Object.fromEntries((ir.pinsets || []).map((s2) => [s2.id, s2.pins]));
-    let anyPinsReview = !!ir.pinsReviewRequired;
+  let irToSave = result.normalizedIr;
+  let revision = job.revision;
 
-    const items = [];
-    for (const rawPkg of ir.packages || []) {
-      if (selected && !selected.includes(rawPkg.name)) continue;
-      let pkg = sanitizePackage(rawPkg);   // family 由服务端重新判定，忽略任何客户端值
-      const fieldEdits = edits[rawPkg.name] || {};
-      for (const [k, v] of Object.entries(fieldEdits)) {
-        if (!PATCHABLE.has(k)) continue;                       // 非白名单字段忽略
-        // item 2：reviewer 来自已认证会话，不接受客户端字符串
-        pkg = applyReviewerEdit(pkg, k, Number(v), session.authenticated ? `${session.name} <${session.sub}>` : '', 'review_patch');
-      }
-      const det = sanitizePinsDetailed(pinsetMap[pkg.pinsetId] || pinsetMap[Object.keys(pinsetMap)[0]] || []);
-      if (det.reviewRequired) anyPinsReview = true;
-      items.push({ pkg, pins: det.pins });
-    }
-    if (!items.length) return res.status(422).json({ error: '没有可生成的封装（检查 patch.includePackages）' });
-
-    const result = generateBundle({
-      part: ir.part,
-      mock: !!ir.mock,                              // mock 由服务端恢复，客户端无法抹掉
-      pinsReviewRequired: anyPinsReview,
-      sessionAuthenticated: session.authenticated,
-      items
+  // 有实质修改 → 状态机推进到 edited，并在同一事务里保存 IR + audit + manifest
+  if (result.changeLog.length) {
+    const t = transition(irToSave, 'edit', { actor: session.sub, role: 'reviewer', reason: 'review_patch' });
+    if (!t.ok) return res.status(409).json({ error: t.error, code: t.code });
+    irToSave = t.ir;
+    const commit = await store.commitGeneration(job.jobId, {
+      ir: irToSave,
+      expectedRevision: job.revision,
+      actor: session.sub,
+      auditEntries: [
+        { action: 'review_patch_applied', detail: { changes: result.changeLog.length, paths: result.changeLog.map((c) => c.path).slice(0, 50) } },
+        { action: 'assets_generated', detail: { nonPromotable: result.bundle.nonPromotable, files: result.assets.files.length } }
+      ],
+      manifest: result.assets.manifest
     });
-    if (typeof result.nonPromotable !== 'boolean') { result.nonPromotable = true; result.reasons = ['gate_missing']; }
-    result.reviewer = session.authenticated ? { sub: session.sub, name: session.name, tenantId: session.tenantId } : null;
-    return res.status(200).json(result);
-  } catch (e) {
-    return res.status(422).json({ error: `生成失败: ${e.message}` });
+    if (!commit.ok) return res.status(409).json({ error: commit.error, code: commit.code, currentRevision: commit.currentRevision });
+    revision = commit.job.revision;
+    irToSave = commit.job.ir;   // 以库内为准
+  } else {
+    await store.appendAudit({ jobId: job.jobId, actor: session.sub, action: 'assets_generated', detail: { nonPromotable: result.bundle.nonPromotable, readOnly: true } });
   }
+
+  const assetToken = signAssetToken({ tenantId: job.tenantId, jobId: job.jobId, revision, sub: session.sub });
+  return res.status(200).json({
+    ...result.bundle,
+    jobId: job.jobId,
+    revision,
+    state: currentState(irToSave),
+    reviewedIr: irToSave,
+    partBundle: result.assets.partBundle,
+    manifest: result.assets.manifest,
+    // item 9：真实文件内容 + 与 tenant/job/revision 绑定的短期下载令牌
+    assetFiles: result.assets.files.map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, content: f.content })),
+    assetToken,
+    reviewer: irToSave.lifecycle?.reviewedBy || null,
+    canReview,
+    canPublish: computeCanPublish(irToSave, result.bundle.assetPromotion || {}, hasRole(session, 'publisher'))
+  });
 }
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }

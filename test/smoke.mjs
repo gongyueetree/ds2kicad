@@ -1,10 +1,12 @@
 // test/smoke.mjs — 单进程端到端冒烟：启动 dev API → 自请求 → 校验 → 退出
 process.env.MOCK_MODE = '1';
 process.env.PORT = '3123';
-process.env.AUTH_MODE = 'dev';
-process.env.JOB_SECRET = 'smoke-secret';
+process.env.EZPLM_JWT_SECRET = 'smoke-jwt-secret';
+process.env.AUTH_MODE = 'production';
 process.env.PDF_TOKEN_SECRET = 'smoke-pdf-secret';
 import express from 'express';
+import { issueDevSession } from '../lib/auth.js';
+const TOKEN = issueDevSession({ sub: 'smoke-user', name: 'Smoke', tenantId: 'smoke-tenant', roles: ['reviewer'] }, 'smoke-jwt-secret');
 import extractHandler from '../api/extract.js';
 import generateHandler from '../api/generate.js';
 
@@ -16,7 +18,7 @@ const srv = app.listen(3123);
 
 const post = async (path, body) => {
   const r = await fetch(`http://localhost:3123${path}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body)
   });
   return { status: r.status, data: await r.json() };
 };
@@ -74,6 +76,9 @@ try {
   check('客户端提交 part 被拒绝', rejected.status === 400 && rejected.data.code === 'client_authoritative_fields_rejected');
   check('bundle 两个符号变体（EP 差异）', gen.data.symbols?.length === 2, gen.data.symbols?.map((s2) => s2.name).join());
   check('bundle 合并库文件名', gen.data.names?.kicadSym === 'TMUXL27518.kicad_sym', gen.data.names?.kicadSym);
+  check('服务端产出 partBundle + manifest', !!gen.data.partBundle && !!gen.data.manifest && Array.isArray(gen.data.assetFiles));
+  check('manifest 含文件哈希', gen.data.manifest?.files?.every((f) => /^[0-9a-f]{64}$/.test(f.sha256)));
+  check('资产级晋升结论', gen.data.assetPromotion && typeof gen.data.assetPromotion.symbol === 'boolean', JSON.stringify(gen.data.assetPromotion));
   const padCount = (gen.data.items[0].files.kicadMod.match(/\(pad "/g) || []).length;
   check('QFN-24 焊盘 24+EP', padCount === 25, `实际 ${padCount}`);
   check('每封装均有封装+3D', gen.data.items.every((it) => it.files.kicadMod && it.files.wrl));

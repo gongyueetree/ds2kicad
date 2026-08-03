@@ -21,7 +21,7 @@
            │
 ┌──────────▼──────────── Vercel Serverless（Node ESM）────────────────────────────────┐
 │ api/extract.js  服务端下载 PDF（≤15MB，SSRF 防护）→ Gemini Flash 结构化提取           │
-│                 → validate.js 清洗 →（MOCK_MODE / 无 Key 时返回内置演示数据）         │
+│                 → validate.js 清洗 →（仅 MOCK_MODE=1 时返回演示数据；无 Key 则 503）   │
 │ api/generate.js lib/kicadgen 确定性引擎：.kicad_sym + .kicad_mod + .wrl + legacy .lib │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -36,6 +36,37 @@
 - 图区包围盒（无论来自解析器还是 AI）仅是候选，用户在渲染页面上拖拽重新框选后才截图（前端 pdf.js 本地完成，2000px 宽 PNG，像素级精确）。
 - Gemini 响应经 3 次重试（指数退避）+ `repairJSON()`，`maxOutputTokens=16384` 防截断。
 - `DETERMINISTIC_FIRST=0` 可关闭混合策略回到全量 AI（对照调试用）。
+
+## 一·三、v0.8.5 生产闭环要点（必读）
+
+- **唯一 Canonical 流程**：Patch → 严格校验 → normalized Reviewed IR → 生成/自检 → **单事务**保存 IR+revision+audit+manifest。生成失败绝不修改 Job；响应 `reviewedIr`、数据库 IR、Part Bundle、KiCad 全部来自同一份 normalized IR。
+- **显式状态机**：`extracted → edited → reviewed → approved → published / revoked`。Review / Approve / Publish / Revoke 是独立接口 `POST /api/lifecycle`，分别要求 reviewer / publisher。
+- **canPublish 依赖持久化批准**：只有 `lifecycle.approvals[asset]` 存在、当前闸门允许、且调用者是 publisher，该资产才可发布——单纯有 publisher 角色不够。
+- **EvidenceGate fail closed**：`relevantFields` 与 landPattern 每个字段都必须有 EvidenceAnchor；缺锚点、`unverified`、`model_inference`、`default` 一律阻断 footprint/3D。**删除 evidence 不会让资产变得可晋升。**
+- **资产阻断范围**：封装几何问题只影响 footprint/3D；管脚问题影响 symbol 及依赖它的资产；图区问题只影响 figures。
+- **Patch 严格校验**：数值越界**直接 400**（不再接受后 clamp）；`confirmed` 必须 boolean、`page` 正整数、`bbox` 必须在 [0,1] 且 x0<x1、y0<y1；addPins/removePins/resolveTransformations/evidence 各层未知字段一律 400；`resolveTransformations` 必须带 reason + evidence。
+- **PostgreSQL**：生产必填 `DATABASE_URL`；自然过期的作业会在创建新作业前被标记 `expired` 并释放幂等唯一索引；Job/Audit/manifest 同一事务提交。
+- **postMessage 协议 v3**：宿主收到的 `files.entries` 现在带**真实文件内容**（`content`）与 `assetToken`（绑定 tenant+job+revision，15 分钟有效）；图区 PNG 由服务端保存并计入 manifest 哈希。
+
+## 一·四、v0.8.4 生产闭环要点
+
+- **生产必须 PostgreSQL**：`DATABASE_URL` 未配置、或在生产设置了 `JOBSTORE_FILE`，服务启动即 fail closed。Vercel Serverless 多实例与冷启动下 `:memory:`/本地 SQLite 不共享，作业必然丢失。本地开发默认 node:sqlite。
+- **Idempotency-Key 作用域** = tenantId + ownerId + operation + documentSha256 + key；唯一索引只对 `active` 作业生效，撤销/过期后同键可重建。
+- **管脚稳定 pinId**：支持新增、删除（墓碑）、改编号；转换证据可经 `resolveTransformations` 由 reviewer 显式 accept。
+- **审核身份**：只有 reviewer/publisher 的实质修改才写入 `reviewedBy`；editor 的空 Patch 不留审核痕迹，editor 提交修改直接 403。
+- **资产级发布**：`canPublish` 是 `{symbol, footprint, model3d, figures}` 对象，各自判定并要求 publisher 角色。
+- **证据驱动闸门**：关键几何字段的 EvidenceAnchor 为 `unverified` / `model_inference` / `default` 时阻断 footprint 与 3D；无已确认图区时 figures 不可晋升。
+- **人工 land pattern** 的 `landPatternSource` 为 `reviewer_entered`，二次清洗不会被重标成 `datasheet`。
+
+## 一·五、v0.8.3 生产数据一致性要点（必读）
+
+- **服务端持久化 JobStore**：`/api/extract` 把 Canonical IR 存入数据库（默认 node:sqlite，`JOBSTORE_FILE` 可配），返回**不透明 UUID** jobId；IR 不再放进客户端可解码 token。支持幂等键、过期、撤销、乐观锁与审计日志。
+- **`/api/generate` 只接受 `{ jobId, patch }`**：Patch 用稳定 ID（`packageId`/`pinsetId`/`figureId`），逐字段记录 before/after/reviewer/reason/evidence/time；非法字段直接 400，不静默忽略。
+- **鉴权授权**：校验 JWT 的 iss/aud/exp/nbf/tenantId，角色 viewer<editor<reviewer<publisher；同租户他人不得重放 jobId（403）；提交修改需 reviewer。
+- **服务端组装产物**：part-bundle.json（v3）、文件 SHA256、manifest 全部由服务端基于同一份 reviewed IR 生成，前端不再本地拼装。
+- **资产级晋升**：symbol / footprint / model3d / figures 分别判定——参数化 WRL 只阻断 3D，已审核的 symbol/footprint 可独立晋升。
+- **严格 family allowlist**：只有明确识别的 SOIC/TSSOP/SSOP/MSOP/SOP/DIP/QFN/DFN/SOT-23 系列受支持；未知类型返回 `unknown` 并拒绝生成，**不再默认回退 dual**。
+- **文本安全层**：MPN/封装名/管脚名/描述统一拒绝控制字符与换行、限长；S-expression、Legacy LIB、文件名、ZIP 路径分别转义，杜绝注入与路径穿越。
 
 ## 二、KLC 合规（v0.6，对照 klc.kicad.org v3.0.6x）
 
@@ -94,7 +125,7 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
 
 | 约束 | 对策 |
 |---|---|
-| Serverless 响应体 4.5MB 上限 | `fetch-pdf` 使用 **Edge Runtime 流式转发**，不受该限制 |
+| Serverless 响应体 4.5MB 上限 | v0.8.1 起 `fetch-pdf` **不再是公开 Edge 代理**：改为 Node Runtime + SafeDownloader + 短期 HMAC 令牌（绑定 URL）；大文件走上传通道或直接由浏览器访问原始 URL |
 | Gemini inline 请求 20MB 上限 | PDF 下载上限默认 15MB（`MAX_PDF_MB`），超限返回 413 |
 | 函数无状态 | 无任何持久化；PDF 按次下载，前端 pdf.js 侧有文档缓存 |
 
@@ -111,7 +142,8 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
 // 宿主 → 插件：注入数据手册并立即开始提取
 iframe.contentWindow.postMessage({ type: 'ezplm:ds2kicad:load', pdfUrl: 'https://…' }, PLUGIN_ORIGIN);
 
-// 插件 → 宿主：用户确认并点击「发送到 ezPLM」后
+// 插件 → 宿主（v3）：payload 含 mock / nonPromotable / promotionBlockReasons /
+// assetToken（tenant+job+revision 绑定，15 分钟）/ files.entries（含真实 content）
 window.addEventListener('message', (e) => {
   if (e.origin !== PLUGIN_ORIGIN) return;          // 必须校验来源
   if (e.data?.type === 'ezplm:ds2kicad:result') {
@@ -142,7 +174,7 @@ test/           单元测试 + 端到端冒烟
 ## 十、已知边界与后续路线
 
 - **管脚↔物理位置映射**：封装引脚位置按编号 1..N 标准排布；若器件管脚编号非标准顺序（极少见），需在封装参数中人工核对。
-- **异形封装**（BGA / LGA / 非对称引脚）暂不支持，属 v0.2 范围；QFN 引脚数非 4 倍数时自动回退 dual 并给出 warning。
+- **异形封装**（BGA/DSBGA/WLCSP、LCCC/PLCC、QFP、TO/DPAK、未知类型）一律判为 unsupported，只输出符号变体，**绝不近似生成封装**；QFN/DFN 引脚数非 4 倍数时 **阻断生成**（v0.8.2 起不再回退 dual）。
 - **图区包围盒精度**：Gemini 对 PDF 的坐标定位是近似的，UI 的拖拽框选即为此设计——演示模式下包围盒为占位值。
 - **STEP 3D**：当前输出 WRL（KiCad 渲染用）；机械级 STEP 需要 CAD 内核，规划接入服务端 CadQuery/build123d 生成（v0.3）。
 - 生成结果投产前请以数据手册机械图复核（`descr` 字段与 UI 均有提示）。

@@ -5,7 +5,7 @@ import express from 'express';
 import { generateBundle } from '../lib/kicadgen/index.js';
 import { generateFootprint } from '../lib/kicadgen/footprint.js';
 import { sanitizePackage, sanitizePinsDetailed, resolveFamily } from '../lib/validate.js';
-import { sealJob, openJob } from '../lib/jobstore.js';
+import { resetJobStoreForTests } from '../lib/jobstore.js';
 import { authenticate, issueDevSession } from '../lib/auth.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
 
@@ -14,30 +14,32 @@ const pins = (n) => Array.from({ length: n }, (_, i) => ({ number: String(i + 1)
 const SOIC = { name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6.0, leadLength: 1.0, height: 1.75 };
 const withLp = (p) => ({ ...p, landPattern: { padW: 0.6, padL: 1.55, rowSpan: 5.4, sourcePage: 63 } });
 const gen = (pkgRaw, pinList = pins(8), extra = {}) =>
-  generateBundle({ part: { mpn: 'T' }, items: [{ pkg: sanitizePackage(pkgRaw), pins: pinList }], ...extra });
+  generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, items: [{ pkg: sanitizePackage(pkgRaw), pins: pinList }], ...extra });
 
-test('反例1：Mock 数据删除 mock 字段仍不可晋升（服务端从 jobId 恢复）', () => {
-  const sealed = sealJob({ part: MOCK_TMUXL27518.part, packages: MOCK_TMUXL27518.packages, pinsets: MOCK_TMUXL27518.pinsets, mock: true, tenantId: 't1' });
-  // 攻击者删除客户端可见的 mock 字段后重放 jobId
-  const opened = openJob(sealed.jobId);
+test('反例1：Mock 数据删除 mock 字段仍不可晋升（服务端 JobStore 恢复）', () => {
+  const store = resetJobStoreForTests();
+  const job = store.create({ ir: { part: MOCK_TMUXL27518.part, packages: MOCK_TMUXL27518.packages, pinsets: MOCK_TMUXL27518.pinsets, mock: true }, tenantId: 't1', ownerId: 'u1' });
+  // v0.8.3：jobId 是不透明 UUID，客户端无法解码/篡改载荷
+  assert.match(job.jobId, /^[0-9a-f]{8}-/);
+  const opened = store.get(job.jobId);
   assert.equal(opened.ok, true);
-  assert.equal(opened.job.ir.mock, true, 'mock 由服务端密封，客户端删不掉');
+  assert.equal(opened.job.ir.mock, true, 'mock 存服务端，客户端删不掉');
   const r = generateBundle({
     part: opened.job.ir.part, mock: opened.job.ir.mock,
+    sessionAuthenticated: true, pinsReviewRequired: false,
     items: [{ pkg: sanitizePackage(withLp(SOIC)), pins: pins(8) }]
   });
   assert.equal(r.nonPromotable, true);
   assert.ok(r.reasons.includes('mock_data'));
-  // 篡改密封载荷 → 签名失败
-  const tampered = sealed.jobId.replace(/^./, (c) => (c === 'A' ? 'B' : 'A'));
-  assert.equal(openJob(tampered).ok, false);
+  // 伪造 jobId 无法命中
+  assert.equal(store.get('00000000-0000-0000-0000-000000000000').ok, false);
 });
 
 test('反例2：DSBGA 且客户端声称 family=dual → 服务端判定 bga、不可晋升', () => {
   const p = sanitizePackage({ ...SOIC, name: 'DSBGA-8', type: 'DSBGA', family: 'dual' });
   assert.equal(p.family, 'bga', '客户端 family 必须被忽略');
   assert.equal(p.familySupported, false);
-  const r = generateBundle({ part: { mpn: 'T' }, items: [{ pkg: p, pins: pins(8) }] });
+  const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, items: [{ pkg: p, pins: pins(8) }] });
   assert.equal(r.nonPromotable, true);
   assert.ok(r.reasons.includes('unsupported_package_family'));
   assert.equal(r.items[0].files.kicadMod, undefined, '不得产出封装文件');
@@ -48,7 +50,7 @@ test('反例3：LCCC / PLCC 不可晋升且不按 QFN 近似', () => {
     const p = sanitizePackage({ ...SOIC, name: `${type}-20`, type, pinCount: 20, pitch: 1.27, bodyLength: 8.89, bodyWidth: 8.89 });
     assert.equal(p.family, 'lcc', `${type} 不应映射为 qfn`);
     assert.equal(p.familySupported, false);
-    const r = generateBundle({ part: { mpn: 'T' }, items: [{ pkg: p, pins: pins(20) }] });
+    const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, items: [{ pkg: p, pins: pins(20) }] });
     assert.equal(r.nonPromotable, true, type);
     assert.equal(r.items[0].files.kicadMod, undefined, `${type} 不得产出封装`);
   }
@@ -72,7 +74,7 @@ test('反例5：leadWidth=99 → clamped 留痕且不可晋升', () => {
   const p = sanitizePackage({ ...withLp(SOIC), leadWidth: 99 });
   assert.equal(p.fieldProvenance.leadWidth.source, 'clamped');
   assert.equal(p.fieldProvenance.leadWidth.rawValue, 99);
-  const r = generateBundle({ part: { mpn: 'T' }, items: [{ pkg: p, pins: pins(8) }] });
+  const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, items: [{ pkg: p, pins: pins(8) }] });
   assert.equal(r.nonPromotable, true);
   assert.ok(r.reasons.includes('value_out_of_range_clamped'));
 });
@@ -83,7 +85,7 @@ test('反例6：landPattern.padW=99 → 整份推荐焊盘弃用、留痕、不�
   assert.equal(p.fieldProvenance['landPattern.padW'].rawValue, 99);
   assert.equal(p.landPattern, null, '非法推荐焊盘必须弃用');
   assert.equal(p.landPatternSource, 'derived_by_rules');
-  const r = generateBundle({ part: { mpn: 'T' }, items: [{ pkg: p, pins: pins(8) }] });
+  const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, items: [{ pkg: p, pins: pins(8) }] });
   assert.equal(r.nonPromotable, true);
   assert.ok(r.reasons.includes('value_out_of_range_clamped'));
   assert.ok(r.reasons.includes('land_pattern_derived_not_from_datasheet'));
@@ -94,7 +96,7 @@ test('反例7：pinCount=8.6 → validation error、不四舍五入掩盖、不�
   assert.ok(p.validationErrors.some((e) => e.field === 'pinCount' && e.error === 'must_be_integer'));
   assert.equal(p.fieldProvenance.pinCount.source, 'invalid');
   assert.equal(p.fieldProvenance.pinCount.rawValue, 8.6);
-  const r = generateBundle({ part: { mpn: 'T' }, items: [{ pkg: p, pins: pins(8) }] });
+  const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, items: [{ pkg: p, pins: pins(8) }] });
   assert.equal(r.nonPromotable, true);
   assert.ok(r.reasons.includes('validation_error'));
 });
@@ -135,22 +137,32 @@ test('2×3mm DFN 回归：文件名 == 内部 footprint 名 == WRL 引用名', (
 });
 
 test('item 1：/api/generate 拒绝客户端提交权威字段，只认 jobId + patch', async () => {
-  process.env.AUTH_MODE = 'dev';
+  // v0.8.3：作业访问必须已认证会话（dev 匿名不可操作作业）
+  const KEY = 'v082-key';
+  process.env.EZPLM_JWT_SECRET = KEY;
+  process.env.AUTH_MODE = 'production';
+  delete process.env.EZPLM_JWT_ISS; delete process.env.EZPLM_JWT_AUD;
+  const { issueDevSession } = await import('../lib/auth.js');
+  const TOKEN = issueDevSession({ sub: 'u1', name: 'T', tenantId: 't1', roles: ['reviewer'] }, KEY);
   const { default: generateHandler } = await import('../api/generate.js');
   const app = express();
   app.use(express.json({ limit: '4mb' }));
   app.all('/api/generate', (req, res) => generateHandler(req, res));
   const srv = app.listen(3971);
   const post = async (b) => {
-    const r = await fetch('http://localhost:3971/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+    const r = await fetch('http://localhost:3971/api/generate', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(b) });
     return { status: r.status, data: await r.json() };
   };
   try {
-    const sealed = sealJob({
-      part: { mpn: 'T' },
-      packages: [withLp(SOIC)],
-      pinsets: [{ id: 'default', pins: pins(8) }],
-      mock: true, tenantId: 'dev'
+    const store = resetJobStoreForTests();
+    const sealed = store.create({
+      ir: {
+        part: { mpn: 'T' },
+        packages: [{ ...sanitizePackage(withLp(SOIC)), packageId: 'pkg_1', pinsetId: 'default' }],
+        pinsets: [{ id: 'default', pins: pins(8), normalizedPins: pins(8), rawPins: pins(8), transformationLog: [], reviewRequired: false }],
+        mock: true
+      },
+      tenantId: 't1', ownerId: 'u1'
     });
     // 提交 part/items/mock → 拒绝
     for (const bad of [{ jobId: sealed.jobId, part: { mpn: 'FAKE' } }, { jobId: sealed.jobId, items: [] }, { jobId: sealed.jobId, mock: false }, { jobId: sealed.jobId, reviewer: 'attacker' }]) {
@@ -161,9 +173,9 @@ test('item 1：/api/generate 拒绝客户端提交权威字段，只认 jobId + 
     // 无 jobId → 拒绝
     assert.equal((await post({ patch: {} })).status, 400);
     // 伪造 jobId → 拒绝
-    assert.equal((await post({ jobId: 'forged.sig' })).status, 400);
+    assert.equal((await post({ jobId: 'forged-not-a-uuid' })).status, 400);
     // 合法：jobId + patch，mock 由服务端恢复
-    const ok = await post({ jobId: sealed.jobId, patch: { includePackages: ['SOIC-8'] } });
+    const ok = await post({ jobId: sealed.jobId, patch: { includePackageIds: ['pkg_1'] } });
     assert.equal(ok.status, 200, JSON.stringify(ok.data));
     assert.equal(ok.data.mock, true, 'mock 必须由服务端恢复');
     assert.equal(ok.data.nonPromotable, true);
@@ -195,7 +207,7 @@ test('item 2/10：reviewer 来自已认证会话；无会话时不可晋升', ()
     if (prev.s === undefined) delete process.env.EZPLM_JWT_SECRET;
   }
   // 未认证会话 → 闸门阻断
-  const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: false, items: [{ pkg: sanitizePackage(withLp(SOIC)), pins: pins(8) }] });
+  const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: false, pinsReviewRequired: false, items: [{ pkg: sanitizePackage(withLp(SOIC)), pins: pins(8) }] });
   assert.equal(r.nonPromotable, true);
   assert.ok(r.reasons.includes('no_authenticated_ezplm_session'));
 });
@@ -229,8 +241,10 @@ test('item 11/12：旧 EXTRACT_PROMPT 路径已删除；OCR 需求页不被丢�
 test('对照：完全合规输入（手册 LP + 无变换 + 已认证 + 忽略 3D）不因闸门恒真而误判', () => {
   const r = generateBundle({
     part: { mpn: 'T' }, sessionAuthenticated: true,
+    pinsReviewRequired: false,
     items: [{ pkg: sanitizePackage(withLp(SOIC)), pins: pins(8) }]
   });
   // 仅剩 approximate_3d 一条（本项目暂无厂商 STEP，这是真实且必要的阻断）
-  assert.deepEqual(r.reasons, ['approximate_parametric_3d_not_vendor_step'], JSON.stringify(r.reasons));
+  // v0.8.5 item 5：缺字段级证据锚点 fail closed（仅 3D + 证据两条，无其他误报）
+  assert.deepEqual(r.reasons.sort(), ['approximate_parametric_3d_not_vendor_step', 'field_evidence_unverified'].sort(), JSON.stringify(r.reasons));
 });
