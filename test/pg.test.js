@@ -92,7 +92,13 @@ test('PG-4：commitGeneration 事务性 —— 失败整体回滚', async (t) =>
   assert.equal(ok.ok, true);
   assert.equal(ok.job.revision, 2);
   const audit2 = (await store.listAudit(job.jobId)).map((a) => a.action);
-  assert.ok(audit2.includes('review_patch_applied') && audit2.includes('manifest_saved'), JSON.stringify(audit2));
+  assert.ok(audit2.includes('review_patch_applied'), JSON.stringify(audit2));
+  // v0.8.7 item 10：Manifest 落**独立表**（不再只写 audit 摘要）
+  const m = await store.getManifest(job.jobId, 2);
+  assert.ok(m, 'manifests 表必须有该 revision 的记录');
+  assert.equal(m.revision, 2);
+  assert.equal(m.irSha256, 'abc');
+  assert.equal(m.manifest.files.length, 3);
 });
 
 test('PG-5：幂等作用域 —— 同租户不同用户/不同文档不串 Job', async (t) => {
@@ -201,4 +207,65 @@ test('PG-10：revoke 事务化且撤销后不可读', async (t) => {
   assert.equal(g.code, 'job_revoked');
   const audit = (await store.listAudit(job.jobId)).map((a) => a.action);
   assert.ok(audit.includes('job_revoked'));
+});
+
+
+test('PG-11：失败注入 —— IR/Audit/Manifest/AssetVersion 全部回滚（item 10）', async (t) => {
+  if (skipIfNoDb(t)) return;
+  const job = await store.create({ ir: ir('ROLLBACK'), tenantId: 'rb', ownerId: 'u1' });
+  const baseAudit = (await store.listAudit(job.jobId)).length;
+  for (const point of ['after_ir', 'after_audit', 'after_manifest', 'after_assets']) {
+    const r = await store.commitGeneration(job.jobId, {
+      ir: ir('MUST-NOT-PERSIST'), expectedRevision: job.revision, actor: 'u1',
+      auditEntries: [{ action: `never_${point}` }],
+      manifest: { irSha256: 'x', state: 'edited', files: [{ path: 'p', sha256: 's', bytes: 1 }] },
+      assetVersions: [{ assetKey: 'footprint:pkg_x', revision: job.revision + 1, versionId: `footprint:pkg_x@r${job.revision + 1}`, irHash: 'x', manifestHash: 'y', publishedBy: 'u1', files: [{ path: 'p', sha256: 's', bytes: 1 }] }],
+      failInjection: point
+    });
+    assert.equal(r.ok, false, `${point} 应失败`);
+    // IR 未变
+    const cur = await store.get(job.jobId);
+    assert.equal(cur.job.ir.part.mpn, 'ROLLBACK', `${point}: IR 不得变化`);
+    assert.equal(cur.job.revision, job.revision, `${point}: revision 不得变化`);
+    // Audit 未增
+    const audit = await store.listAudit(job.jobId);
+    assert.equal(audit.length, baseAudit, `${point}: audit 不得写入`);
+    assert.ok(!audit.some((a) => a.action.startsWith('never_')));
+    // Manifest 未写
+    assert.equal(await store.getManifest(job.jobId, job.revision + 1), null, `${point}: manifest 不得写入`);
+    // AssetVersion 未写
+    assert.equal((await store.listAssetVersions(job.jobId)).length, 0, `${point}: asset_versions 不得写入`);
+  }
+  // 无注入时全部生效
+  const ok = await store.commitGeneration(job.jobId, {
+    ir: ir('PERSISTED'), expectedRevision: job.revision, actor: 'u1',
+    auditEntries: [{ action: 'ok_action' }],
+    manifest: { irSha256: 'ih', state: 'edited', files: [{ path: 'p', sha256: 's', bytes: 1 }] },
+    assetVersions: [{ assetKey: 'footprint:pkg_x', revision: job.revision + 1, versionId: `footprint:pkg_x@r${job.revision + 1}`, irHash: 'ih', manifestHash: 'mh', assetHash: 'ah', publishedBy: 'u1', files: [{ path: 'p', sha256: 's', bytes: 1, objectKey: 'obj/k', contentType: 'image/png' }] }]
+  });
+  assert.equal(ok.ok, true);
+  assert.equal((await store.get(job.jobId)).job.ir.part.mpn, 'PERSISTED');
+  assert.ok(await store.getManifest(job.jobId, ok.job.revision));
+  const avs = await store.listAssetVersions(job.jobId);
+  assert.equal(avs.length, 1);
+  assert.equal(avs[0].files[0].objectKey, 'obj/k');
+  assert.equal(avs[0].files[0].contentType, 'image/png');
+});
+
+test('PG-12：AssetVersion 唯一约束（job+assetKey+revision）', async (t) => {
+  if (skipIfNoDb(t)) return;
+  const job = await store.create({ ir: ir('UNIQ'), tenantId: 'uq', ownerId: 'u1' });
+  const mk = (rev) => ({
+    ir: ir('UNIQ'), expectedRevision: rev, actor: 'u1',
+    assetVersions: [{ assetKey: 'symbol:default', revision: rev + 1, versionId: `symbol:default@r${rev + 1}`, irHash: 'h', manifestHash: 'm', publishedBy: 'u1', files: [] }]
+  });
+  const c1 = await store.commitGeneration(job.jobId, mk(job.revision));
+  assert.equal(c1.ok, true);
+  // 同 job+assetKey+revision 再插入必须冲突（事务回滚）
+  const dup = await store.commitGeneration(job.jobId, {
+    ...mk(c1.job.revision),
+    assetVersions: [{ assetKey: 'symbol:default', revision: job.revision + 1, versionId: 'dup', irHash: 'h', manifestHash: 'm', publishedBy: 'u1', files: [] }]
+  });
+  assert.equal(dup.ok, false, '唯一约束必须阻止重复 AssetVersion');
+  assert.equal((await store.listAssetVersions(job.jobId)).length, 1);
 });

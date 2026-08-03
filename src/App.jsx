@@ -1,7 +1,7 @@
 // src/App.jsx — 主流程：贴 URL → 提取 → 确认（多封装/多 pinset）→ 批量生成 → 预览 → 导出
 import { useEffect, useMemo, useState } from 'react';
-import { apiExtract, apiGenerate } from './api.js';
-import { setLocalPdf, setPdfToken } from './pdf.js';
+import { apiExtract, apiGenerate, apiLoadJob } from './api.js';
+import { setLocalPdf, setPdfToken, setJobId } from './pdf.js';
 import PinTable from './components/PinTable.jsx';
 import PackageForm from './components/PackageForm.jsx';
 import FigureEditor from './components/FigureEditor.jsx';
@@ -18,6 +18,7 @@ export default function App() {
   const [url, setUrl] = useState(params.get('pdf') || DEMO_URL);
   const [file, setFile] = useState(null); // 上传模式的本地 PDF File
   const [session, setSession] = useState(null); // ezPLM 会话：{origin, nonce, jobId}
+  const [reviewReason, setReviewReason] = useState('');   // item 6：统一审核理由（所有人工修改共用）
   // item 2：审核身份只能来自 ezPLM 已认证会话（服务端从 JWT 取出），前端不再自填
   const [phase, setPhase] = useState('idle');
   const [error, setError] = useState('');
@@ -40,6 +41,7 @@ export default function App() {
       const d = e.data;
       if (!d || typeof d.nonce !== 'string' || !d.nonce || typeof d.jobId !== 'string' || !d.jobId) return;
       setSession({ origin: e.origin, nonce: d.nonce, jobId: d.jobId });
+      if (d.type === 'ezplm:ds2kicad:handshake') return;   // 仅建立会话（nonce/jobId 已在上方保存）
       if (d.type === 'ezplm:ds2kicad:load' && typeof d.pdfUrl === 'string') {
         setUrl(d.pdfUrl);
         doExtract(d.pdfUrl);
@@ -84,7 +86,8 @@ export default function App() {
         payload = { pdfUrl: u };
       }
       const data = await apiExtract(payload);
-      setPdfToken(data.pdfToken); // 受控取回令牌（item 7）
+      setPdfToken(data.pdfToken);
+      setJobId(data.jobId);   // v0.8.6：图集经 /api/job-pdf 取回，避免跨实例令牌与二次下载
       // pinsets 兼容：老响应无 pinsets 时由 pins 合成单一集
       const sets = Array.isArray(data.pinsets) && data.pinsets.length
         ? data.pinsets
@@ -138,9 +141,11 @@ export default function App() {
       // item 1：只提交 jobId + 审核 Patch；part/pins/mock/provenance 由服务端从 jobId 恢复
       // v0.8.4 item 2：页面上所有可编辑内容都必须进入 Patch（此前只提交了封装数值）
       const orig = extract.__original || {};
+      // item 6：所有人工修改统一携带审核理由
+      const R = (v) => ({ value: v, reason: reviewReason || '页面人工修改' });
       const partPatch = {};
       for (const k of ['mpn', 'manufacturer', 'title', 'description_zh']) {
-        if ((part?.[k] ?? '') !== (orig.part?.[k] ?? '')) partPatch[k] = part[k];
+        if ((part?.[k] ?? '') !== (orig.part?.[k] ?? '')) partPatch[k] = R(part[k]);
       }
       const pkgPatches = [];
       for (const p of pkgs) {
@@ -148,7 +153,7 @@ export default function App() {
         const entry = { packageId: p.packageId };
         let touched = false;
         // item 2：可选尺寸支持置 null（leadWidth/EP）
-        for (const [k, v] of Object.entries(p.fieldEdits || {})) { entry[k] = v === '' ? null : v; touched = true; }
+        for (const [k, v] of Object.entries(p.fieldEdits || {})) { entry[k] = R(v === '' ? null : v); touched = true; }
         if ((p.name ?? '') !== (o.name ?? '')) { entry.name = p.name; touched = true; }
         if ((p.pinsetId ?? '') !== (o.pinsetId ?? '')) { entry.pinsetId = p.pinsetId; touched = true; }
         // item 2：landPattern 支持整体置 null（清除推荐焊盘）
@@ -174,18 +179,18 @@ export default function App() {
         for (const pin of curPins) {
           const op = origPins.find((x) => x.pinId === pin.pinId);
           if (!op) {                       // 页面新增的管脚
-            addPins.push({ number: String(pin.number), name: pin.name, type: pin.type, description: pin.description || '', reason: '页面新增' });
+            addPins.push({ number: String(pin.number), name: pin.name, type: pin.type, description: pin.description || '', reason: reviewReason || '页面新增管脚' });
             continue;
           }
           const d = { pinId: pin.pinId };
           let t = false;
           for (const k of ['name', 'type', 'description', 'number']) {
-            if ((pin[k] ?? '') !== (op[k] ?? '')) { d[k] = pin[k]; t = true; }
+            if ((pin[k] ?? '') !== (op[k] ?? '')) { d[k] = R(pin[k]); t = true; }
           }
           if (t) pinPatches.push(d);
         }
         for (const op of origPins) {       // 页面删除的管脚
-          if (!curPins.some((p) => p.pinId === op.pinId)) removePins.push({ pinId: op.pinId, reason: '页面删除' });
+          if (!curPins.some((p) => p.pinId === op.pinId)) removePins.push({ pinId: op.pinId, reason: reviewReason || '页面删除管脚' });
         }
         if (pinPatches.length || addPins.length || removePins.length) {
           pinsetPatches.push({
@@ -222,7 +227,7 @@ export default function App() {
       }
       for (const o of orig.figures || []) {
         if (!figures.some((f) => f.figureId === o.figureId)) {
-          removeFigures.push({ figureId: o.figureId, reason: '页面删除图区' });
+          removeFigures.push({ figureId: o.figureId, reason: reviewReason || '页面删除图区' });
         }
       }
       const result = await apiGenerate({
@@ -344,6 +349,15 @@ export default function App() {
         <>
           <section className="card">
             <h2>① 器件信息确认</h2>
+            <p className="hint">
+              审核理由（本次所有人工修改共用，服务端要求必填）：
+              <input
+                style={{ width: 320, marginLeft: 8, display: 'inline-block' }}
+                value={reviewReason}
+                placeholder="例如：对照手册 p.63 机械图核对"
+                onChange={(e) => setReviewReason(e.target.value)}
+              />
+            </p>
             <div className="part-grid">
               <label>型号<input value={part.mpn} onChange={(e) => setPart({ ...part, mpn: e.target.value })} /></label>
               <label>厂商<input value={part.manufacturer} onChange={(e) => setPart({ ...part, manufacturer: e.target.value })} /></label>
@@ -381,7 +395,7 @@ export default function App() {
               />
             )}
             {confirmTab === 'figs' && (
-              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} />
+              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} jobId={extract.jobId} revision={extract.revision} />
             )}
           </section>
 

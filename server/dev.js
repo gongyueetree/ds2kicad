@@ -5,6 +5,8 @@ import generateHandler from '../api/generate.js';
 import lifecycleHandler from '../api/lifecycle.js';
 import figureUploadHandler from '../api/figure-upload.js';
 import fetchPdfHandler from '../api/fetch-pdf.js';
+import jobPdfHandler from '../api/job-pdf.js';
+import jobHandler from '../api/job.js';
 
 const app = express();
 app.use(express.json({ limit: '8mb' }));
@@ -17,6 +19,8 @@ app.all('/api/generate', (req, res) => generateHandler(req, res));
 // v0.8.6 item 11：fetch-pdf 自 v0.8.1 起已是 Node 风格 handler（req, res），
 // 此前仍按 Edge 的 Request→Response 方式调用，本地 PDF 渲染（图集缩略图）必然失败。
 app.all('/api/fetch-pdf', (req, res) => fetchPdfHandler(req, res));
+app.all('/api/job-pdf', (req, res) => jobPdfHandler(req, res));
+app.all('/api/job', (req, res) => jobHandler(req, res));
 
 // item 10：测试专用 —— 允许 E2E 切换服务端 Stub（仅 AUTH_MODE=dev 时启用）
 if (process.env.AUTH_MODE === 'dev') {

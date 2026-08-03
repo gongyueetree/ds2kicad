@@ -20,3 +20,13 @@ async function post(path, body) {
 
 export const apiExtract = (payload) => post('/api/extract', typeof payload === 'string' ? { pdfUrl: payload } : payload);
 export const apiGenerate = (payload) => post('/api/generate', payload);
+
+/** item 11：认证态 reloadJob（?job=<id> 恢复） */
+export async function apiLoadJob(jobId) {
+  const r = await fetch(`/api/job?jobId=${encodeURIComponent(jobId)}`, { credentials: 'same-origin' });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `加载作业失败（${r.status}）`);
+  return data;
+}
+export const apiFigureUpload = (payload) => post('/api/figure-upload', payload);
+export const apiLifecycle = (payload) => post('/api/lifecycle', payload);

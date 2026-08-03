@@ -37,6 +37,19 @@
 - Gemini 响应经 3 次重试（指数退避）+ `repairJSON()`，`maxOutputTokens=16384` 防截断。
 - `DETERMINISTIC_FIRST=0` 可关闭混合策略回到全量 AI（对照调试用）。
 
+## 一·一、v0.8.7 生产闭环要点（必读）
+
+- **空 Patch 也持久化 Final IR**：几何归一化后的 IR 会落库（首次归一化必然改动内容），DB IR / reviewedIr / Part Bundle / KiCad / Manifest / irHash 全部同源；归一化稳定后再次空 Patch 不再涨 revision。
+- **资产版本级审批**：键为 `symbol:<pinsetId>` / `footprint:<packageId>` / `model3d:<packageId>` / `figure:<figureId>`；支持**分批** approve/publish（`approved` 状态下可继续批准其余资产）；Approval 绑定**事务提交后的最终 revision** 与 irHash/manifestHash/assetHash，不会"保存后立刻因 revision+1 失效"。
+- **Lifecycle Pipeline**：transition → 最终 revision/state → Final IR → generate → manifest → approval/asset hash → **单事务提交**。所有 lifecycle 动作（含 review）都基于跃迁**后**的 IR 重新生成 Manifest。
+- **published 资产保护**：直接修改返回 409 `published_asset_immutable`；带 `allowDraftFork: true` 则创建新 draft revision（state 变 `edited`，旧发布记录存入 `draftOf.publishedSnapshot`，AssetVersion 仍不可变留存）。绝不会出现"改成功但 state 仍是 published"。
+- **PromotionGate 资产键级**：`assetKeyPromotion` 精确到具体键；Package / Pin / Figure 使用独立错误码（`package_field_evidence_unverified` / `pin_field_evidence_unverified` / `figure_evidence_missing`）。**Figure 缺证据只阻断该 `figure:<id>`**，不波及 footprint/3D。
+- **人工修改必须有理由**：所有 patch 字段（含 landPattern 子字段、addPins/removePins/addFigures/removeFigures）都要求 `reason` 或可定位 evidence；前端有统一「审核理由」输入框。管脚 number/name/type/description 的增改删都生成 EvidenceAnchor 与墓碑，sanitize 全程保留 `reviewerAdded`/`reviewerEdited`/`evidence`。
+- **Figure 真实文件链**：浏览器裁剪 → `POST /api/figure-upload`（强制 `expectedRevision`，**完整 PNG 解码**：chunk/CRC32/IDAT inflate/像素长度校验，拒绝只有 PNG 头的伪文件）→ 存**对象存储**并写 objectKey/sha256/尺寸/媒体类型（**PNG 不入 IR**）→ 使该 Figure 旧批准失效 → 再 generate 进 Manifest。图片绑定 documentSha256/page/bbox。
+- **ZIP 与 postMessage 只用服务端 assetFiles**，ZIP 文件集合与 Manifest **严格相等**（多一个即失败）。
+- **独立数据表**：`manifests` / `asset_versions` / `asset_files`；AssetVersion 有 `(job_id, asset_key, revision)` 唯一约束并保存**资产专属文件**；Job 创建+Audit、Lifecycle、Manifest、AssetVersion、Revoke 全部真事务（失败注入四个点均整体回滚）。
+- **前端**：可选尺寸置 null 会提交；新 Figure 用稳定 tempId，服务端返回正式 ID；`?job=<id>` 经认证态 `GET /api/job` 恢复；canPublish UI 使用具体资产键。
+
 ## 一·二、v0.8.6 生产闭环要点（必读）
 
 - **Canonical Pipeline 顺序固定**：Patch → strict validate → **geometry normalization** → Final immutable IR（`Object.freeze`）→ lifecycle transition → 确定最终 revision → generate → manifest → **原子提交**。生成器不得在 Final IR 之后修改任何几何数值（`geometryNormalized` 冻结标记）。

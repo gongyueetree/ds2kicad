@@ -309,7 +309,9 @@ export default async function handler(req, res) {
           mock: false,
           pinsReviewRequired,
           pdfUrl: v.url,
-          documentSha256: docSha
+          documentSha256: docSha,
+          // 图集裁剪复用（避免二次回源导致慢站超时）；超过 6MB 不缓存
+          pdfBase64: pdfBuf.length <= 6 * 1024 * 1024 ? pdfBuf.toString('base64') : null
         }, { documentSha256: docSha });
         const job = await store.create({
           ir, tenantId: session.tenantId, ownerId: session.sub,
@@ -348,7 +350,9 @@ export default async function handler(req, res) {
         packages: [sanitizePackage({ pinCount: det.pins.length })],
         pinsets: sanitizePinsets(det.pinsets, det.pins),
         figures: (await import('../lib/figfilter.js')).filterFigures(sanitizeFigures(det.figures), { pkgCount: 1 }),
-        mock: false, degraded: true, pdfUrl: v.url, documentSha256: docSha
+        mock: false, degraded: true, pdfUrl: v.url, documentSha256: docSha,
+          // 图集裁剪复用（避免二次回源导致慢站超时）；超过 6MB 不缓存
+          pdfBase64: pdfBuf.length <= 6 * 1024 * 1024 ? pdfBuf.toString('base64') : null
       }, { documentSha256: docSha });
       const dStore = await getJobStore();
       const dJob = await dStore.create({

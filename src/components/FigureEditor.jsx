@@ -2,6 +2,7 @@
 // AI 给出候选页码 + 包围盒 → pdf.js 渲染页面 → 用户拖拽微调裁剪框 → 生成 PNG
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { loadPdf, renderPage, cropToDataUrl } from '../pdf.js';
+import { apiFigureUpload } from '../api.js';
 
 const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用示例', pin_configuration: '管脚排布图' };
 
@@ -69,7 +70,7 @@ function CropStage({ pageCanvas, bbox, onBbox }) {
   );
 }
 
-export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock }) {
+export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock, jobId, revision }) {
   const [doc, setDoc] = useState(null);
   const [pageCount, setPageCount] = useState(0);
   const [active, setActive] = useState(0);
@@ -188,7 +189,24 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
           <div style={{ marginTop: 10 }}>
             {fig.confirmed
               ? <button className="btn-secondary" onClick={() => updFig({ confirmed: false })}>✓ 已确认（点击取消）</button>
-              : <button className="btn-primary" onClick={() => updFig({ confirmed: true })}>确认此图（按当前框选截取）</button>}
+              : <button className="btn-primary" onClick={async () => {
+                  // v0.8.7 item 7：确认即把裁剪 PNG 真实上传到服务端（对象存储），再标记 confirmed
+                  updFig({ confirmed: true });
+                  try {
+                    const dataUrl = previews[active];
+                    if (dataUrl && jobId && fig.figureId) {
+                      await apiFigureUpload({
+                        jobId, figureId: fig.figureId,
+                        pngBase64: dataUrl.split(',')[1],
+                        expectedRevision: revision,
+                        page: fig.page, bbox: fig.bbox
+                      });
+                      setStatus('图片已上传到服务端 ✓');
+                    }
+                  } catch (e) {
+                    setStatus(`图片上传失败：${e.message}`);
+                  }
+                }}>确认此图（截取并上传）</button>}
           </div>
         </div>
       </div>

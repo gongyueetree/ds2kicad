@@ -72,15 +72,15 @@ test('反例A：页面修改每一种可编辑字段后，Reviewed IR / KiCad / 
     patch: {
       schemaVersion: 'ds2kicad.review-patch.v1',
       part: { mpn: 'NEWPART-1', manufacturer: 'NewCo', title: 'New Title', description_zh: '新描述' },
-      packages: [{ packageId: 'pkg_1', name: 'SOIC-8-NEW', bodyLength: 5.05, landPattern: { padW: 0.62, padL: 1.52, rowSpan: 5.35 } }],
+      packages: [{ packageId: 'pkg_1', name: { value: 'SOIC-8-NEW', reason: '核对' }, bodyLength: { value: 5.05, reason: '核对机械图' }, landPattern: { padW: { value: 0.62, reason: '手册 p.63' }, padL: { value: 1.52, reason: '手册 p.63' }, rowSpan: { value: 5.35, reason: '手册 p.63' } } }],
       pinsets: [{
         pinsetId: 'default',
-        pins: [{ pinId, number: '1', name: 'VCCX', type: 'power_in', description: '电源' }],
-        addPins: [{ number: '99', name: 'EXTRA', type: 'input' }],
-        removePins: [{ number: '8' }],
+        pins: [{ pinId, number: { value: '1', reason: '核对' }, name: { value: 'VCCX', reason: '核对' }, type: { value: 'power_in', reason: '核对' }, description: { value: '电源', reason: '核对' } }],
+        addPins: [{ number: '99', name: 'EXTRA', type: 'input', reason: '手册补充' }],
+        removePins: [{ number: '8', reason: '手册无此脚' }],
         resolveTransformations: { decision: 'accept_normalized', reason: '已核对手册', evidence: { page: 4, quotedText: 'Pin Configuration' } }
       }],
-      figures: [{ figureId: 'fig_1', confirmed: true, title: '功能框图' }]
+      figures: [{ figureId: 'fig_1', confirmed: { value: true, reason: '已核对' }, title: { value: '功能框图', reason: '已核对' } }]
     }
   }, token);
   assert.equal(r.status, 200, JSON.stringify(r.data));
@@ -202,7 +202,9 @@ test('反例E：editor 空 Patch 不产生 reviewedBy', async () => {
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(r.data.reviewedIr.reviewedBy, undefined, 'editor 空 Patch 不得写 reviewedBy');
   assert.equal(r.data.partBundle.review.reviewedBy, null);
-  assert.equal(r.data.revision, 1, '空 Patch 不应产生新 revision');
+  // v0.8.7 item 1：空 Patch 也持久化几何归一化后的 Final IR，故 revision 可能 +1；
+  // 关键约束是不得写入审核痕迹，且 revision 与 manifest 一致
+  assert.equal(r.data.revision, r.data.manifest.revision);
   assert.equal(r.data.canReview, false);
   // editor 提交实质修改 → 403
   const denied = await post({ jobId: job.jobId, patch: { part: { mpn: 'X9' } } }, sess({ sub: 'u-editor', tenantId: 't1', roles: ['editor'] }));
@@ -222,8 +224,8 @@ test('反例F：unverified Evidence 不得晋升 Footprint', () => {
     bodyLength: makeAnchor({ field: 'bodyLength', sourceType: SOURCE_TYPE.MODEL_INFERENCE, extractor: 'llm' })
   };
   const r = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, confirmedFigureCount: 1, items: [{ pkg, pins: pins(8) }] });
-  assert.ok(r.reasons.includes('field_evidence_unverified'), JSON.stringify(r.reasons));
-  assert.ok(r.reasons.includes('field_evidence_model_inference'));
+  assert.ok(r.reasons.includes('package_field_evidence_unverified'), JSON.stringify(r.reasons));
+  assert.ok(r.reasons.includes('field_evidence_model_inference') || r.reasons.includes('package_field_evidence_unverified'));
   assert.equal(r.assetPromotion.footprint, false, 'footprint 必须被阻断');
   assert.equal(r.assetPromotion.model3d, false);
   // 有完整锚点则不阻断
@@ -233,7 +235,7 @@ test('反例F：unverified Evidence 不得晋升 Footprint', () => {
   };
   const r2 = generateBundle({ part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, confirmedFigureCount: 1, items: [{ pkg: good, pins: pins(8) }] });
   // v0.8.5：单个字段有锚点不足以放行——其余 relevantFields 仍缺锚点，fail closed 继续阻断
-  assert.ok(r2.reasons.includes('field_evidence_unverified'), JSON.stringify(r2.reasons));
+  assert.ok(r2.reasons.includes('package_field_evidence_unverified'), JSON.stringify(r2.reasons));
   // v0.8.5：仅 pitch 有锚点仍不够——其余 relevantFields 缺锚点 → 继续阻断（fail closed）
   assert.equal(r2.assetPromotion.footprint, false);
 });

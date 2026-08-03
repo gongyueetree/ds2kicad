@@ -6,19 +6,13 @@ import { setCors } from './extract.js';
 import { getJobStore } from '../lib/jobstore.js';
 import { authenticate, authorizeJobAccess } from '../lib/auth.js';
 import { safeFileName } from '../lib/textsafe.js';
+import { decodePngStrict } from '../lib/png.js';
+import { getObjectStore, objectKey } from '../lib/objectstore.js';
+import { invalidateAffectedApprovals } from '../lib/lifecycle.js';
 
-const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const MAX_BYTES = 4 * 1024 * 1024;
-
-/** 校验 PNG：魔数 + IHDR 尺寸解析（拒绝伪装成 PNG 的其他内容） */
+/** item 7：完整 PNG 解码校验（chunk/CRC/IDAT 解压/像素长度），拒绝只有头的伪文件 */
 export function validatePng(buf) {
-  if (!Buffer.isBuffer(buf) || buf.length < 24) return { ok: false, error: '数据过短' };
-  if (!buf.subarray(0, 8).equals(PNG_MAGIC)) return { ok: false, error: '不是 PNG（魔数不匹配）' };
-  if (buf.subarray(12, 16).toString('latin1') !== 'IHDR') return { ok: false, error: 'PNG 缺少 IHDR' };
-  const width = buf.readUInt32BE(16), height = buf.readUInt32BE(20);
-  if (!width || !height || width > 20000 || height > 20000) return { ok: false, error: `PNG 尺寸非法 ${width}x${height}` };
-  if (buf.length > MAX_BYTES) return { ok: false, error: `PNG 超过 ${MAX_BYTES / 1048576}MB` };
-  return { ok: true, width, height };
+  return decodePngStrict(buf, { maxBytes: 4 * 1024 * 1024 });
 }
 
 export default async function handler(req, res) {
@@ -43,7 +37,11 @@ export default async function handler(req, res) {
   const job = got.job;
   const az = authorizeJobAccess(session, job, { requireRole: 'reviewer' });
   if (!az.ok) return res.status(az.status).json({ error: az.error, code: az.code });
-  if (expectedRevision !== undefined && expectedRevision !== job.revision) {
+  // item 7：upload 强制 expectedRevision
+  if (expectedRevision === undefined) {
+    return res.status(400).json({ error: '必须携带 expectedRevision', code: 'expected_revision_required' });
+  }
+  if (expectedRevision !== job.revision) {
     return res.status(409).json({ error: `版本冲突：当前 ${job.revision}`, code: 'revision_conflict', currentRevision: job.revision });
   }
 
@@ -57,22 +55,42 @@ export default async function handler(req, res) {
 
   const sha = createHash('sha256').update(buf).digest('hex');
   const imagePath = `figures/${safeFileName(`${figureId}.png`)}`;
-  const nextIr = structuredClone(job.ir);
+
+  // item 8：PNG **不入 IR** —— 存对象存储，IR 只留不可变对象键 + 元数据
+  const oStore = getObjectStore();
+  const key = objectKey({ tenantId: job.tenantId, jobId, kind: 'figure', sha256: sha, ext: 'png' });
+  const put = await oStore.put(key, buf, { contentType: 'image/png' });
+
+  let nextIr = structuredClone(job.ir);
   const target = nextIr.figures.find((f) => f.figureId === figureId);
-  target.imageBase64 = buf.toString('base64');   // 无对象存储时内联；有 OBJECT_STORE_URL 时改为上传后存 URL
+  delete target.imageBase64;                       // 清除历史内联数据
+  target.image = {
+    objectKey: put.key, sha256: sha, bytes: buf.length,
+    width: v.width, height: v.height, contentType: 'image/png',
+    // item 7：图片必须绑定文档与裁剪区域
+    documentSha256: body.documentSha256 || job.ir.documentSha256 || null,
+    page: Number.isInteger(body.page) ? body.page : target.page ?? null,
+    bbox: Array.isArray(body.bbox) ? body.bbox.map(Number) : target.bbox ?? null,
+    uploadedBy: { sub: session.sub, at: new Date().toISOString() }
+  };
   target.imagePath = imagePath;
   target.imageSha256 = sha;
-  target.imageWidth = v.width;
-  target.imageHeight = v.height;
-  target.imageUploadedBy = { sub: session.sub, at: new Date().toISOString() };
+
+  // item 7：使该 Figure 的旧批准/发布失效
+  const inv = invalidateAffectedApprovals(nextIr, [{ path: `figures[${figureId}].image` }]);
+  nextIr = inv.ir;
 
   const commit = await store.commitGeneration(jobId, {
     ir: nextIr, expectedRevision: job.revision, actor: session.sub,
-    auditEntries: [{ action: 'figure_image_uploaded', detail: { figureId, imagePath, sha256: sha, bytes: buf.length, size: `${v.width}x${v.height}` } }]
+    auditEntries: [{ action: 'figure_image_uploaded', detail: { figureId, objectKey: put.key, sha256: sha, bytes: buf.length, size: `${v.width}x${v.height}`, invalidated: inv.invalidated } }]
   });
   if (!commit.ok) return res.status(409).json({ error: commit.error, code: commit.code });
 
-  return res.status(200).json({ jobId, figureId, imagePath, imageSha256: sha, bytes: buf.length, width: v.width, height: v.height, revision: commit.job.revision });
+  return res.status(200).json({
+    jobId, figureId, imagePath, imageSha256: sha, objectKey: put.key,
+    bytes: buf.length, width: v.width, height: v.height,
+    revision: commit.job.revision, invalidatedApprovals: inv.invalidated
+  });
 }
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }

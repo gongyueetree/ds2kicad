@@ -1,11 +1,13 @@
-// e2e/review-flow.spec.js — v0.8.6 item 10：真实页面 E2E（Playwright）。
-// Live-stub / Degraded 通过**服务端可注入 Stub**（GEMINI_STUB / OCR_STUB）执行真实服务端分支，
-// 不再靠改写响应 meta.mode 伪装。覆盖：
-//   extract → 修改每类可编辑字段 → 增删管脚 → 增删 Figure → generate → export(ZIP 逐文件哈希)
-//   → 捕获并校验 postMessage 内容 → 真实 reloadJob 后页面与数据库一致
+// e2e/review-flow.spec.js — v0.8.7 item 12：真实页面 E2E（Playwright）。
+// 相较 v0.8.6 的强化：
+//   1) PostMessage 测试使用 **embed 模式 + 真实 nonce/jobId 握手**，不再条件跳过；
+//   2) 页面确认 Figure 必须断言真实发生了 POST /api/figure-upload；
+//   3) 新增/删除 Figure 与可选尺寸置 null 必须直接查数据库确认写入；
+//   4) reloadJob 走 ?job=<id> 真实恢复（认证态 /api/job）；
+//   5) ZIP 必须**严格等于** Manifest —— 多一个文件即失败。
 //
-// ⚠ 本仓库沙箱无法下载 Chromium（网络策略），本文件在 v0.8.6 交付时 **未运行**（NOT VERIFIED）。
-//   在有外网的开发机运行：npx playwright install chromium && npm run e2e
+// ⚠ 本仓库沙箱无法下载 Chromium（网络策略），本文件在 v0.8.7 交付时 **未运行**（NOT VERIFIED）。
+//   在有外网机器运行：npx playwright install chromium && npm run e2e
 import { test, expect } from '@playwright/test';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
@@ -16,12 +18,18 @@ const DB = process.env.JOBSTORE_FILE || '/tmp/ds2kicad-e2e.db';
 const readJob = (jobId) => {
   const db = new DatabaseSync(DB);
   const row = db.prepare('SELECT ir_json, revision FROM jobs WHERE job_id = ?').get(jobId);
+  const man = db.prepare('SELECT manifest_json, state FROM manifests WHERE job_id = ? ORDER BY revision DESC LIMIT 1').get(jobId);
   db.close();
-  return row ? { ir: JSON.parse(row.ir_json), revision: Number(row.revision) } : null;
+  return row ? { ir: JSON.parse(row.ir_json), revision: Number(row.revision), manifest: man ? JSON.parse(man.manifest_json) : null, manifestState: man?.state } : null;
 };
 
+/** 捕获 API 响应与请求（用于断言 figure-upload 真实发生） */
 function captureApi(page) {
-  const seen = { extract: null, generate: null, posted: [] };
+  const seen = { extract: null, generate: null, uploads: [], jobLoads: [] };
+  page.on('request', (r) => {
+    if (r.url().endsWith('/api/figure-upload') && r.method() === 'POST') seen.uploads.push(JSON.parse(r.postData() || '{}'));
+    if (r.url().includes('/api/job?')) seen.jobLoads.push(r.url());
+  });
   page.on('response', async (r) => {
     if (r.url().endsWith('/api/extract') && r.ok()) seen.extract = await r.json().catch(() => null);
     if (r.url().endsWith('/api/generate') && r.ok()) seen.generate = await r.json().catch(() => null);
@@ -29,22 +37,27 @@ function captureApi(page) {
   return seen;
 }
 
-/** 在页面内安装 postMessage 捕获器（模拟 ezPLM 宿主并回 ACK） */
-async function installHostStub(page) {
-  await page.addInitScript(() => {
-    window.__ds2kMessages = [];
-    window.addEventListener('message', (e) => {
-      const d = e.data;
-      if (d?.type === 'ezplm:ds2kicad:result') {
-        window.__ds2kMessages.push(d);
-        // 立即回 ACK（item 7）
-        window.postMessage({ type: 'ezplm:ds2kicad:ack', jobId: d.jobId, nonce: d.nonce, receivedFiles: d.files?.entries?.length ?? 0 }, '*');
-      }
-    });
+/** item 12①：真实 ezPLM 宿主页（embed 模式）——完成 nonce/jobId 握手并回 ACK */
+const HOST_HTML = (childUrl, nonce, hostJobId) => `<!doctype html><html><body>
+<iframe id="plugin" src="${childUrl}" style="width:1280px;height:900px;border:0"></iframe>
+<script>
+  window.__received = [];
+  const nonce = ${JSON.stringify(nonce)};
+  const hostJobId = ${JSON.stringify(hostJobId)};
+  const frame = document.getElementById('plugin');
+  frame.addEventListener('load', () => {
+    // 宿主 → 插件：握手（携带 nonce + jobId）
+    frame.contentWindow.postMessage({ type: 'ezplm:ds2kicad:handshake', nonce, jobId: hostJobId }, '*');
   });
-}
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (d && d.type === 'ezplm:ds2kicad:result') {
+      window.__received.push(d);
+      e.source.postMessage({ type: 'ezplm:ds2kicad:ack', jobId: d.jobId, nonce: d.nonce, receivedFiles: d.files?.entries?.length ?? 0 }, e.origin);
+    }
+  });
+</script></body></html>`;
 
-/** 三种模式：均走真实服务端分支（由服务端环境变量注入 Stub） */
 const MODES = [
   { name: 'Mock', env: { MOCK_MODE: '1' } },
   {
@@ -64,12 +77,9 @@ const MODES = [
 ];
 
 for (const mode of MODES) {
-  test(`${mode.name}：全流程一致性（真实服务端分支）`, async ({ page, request }) => {
-    // 通过测试专用端点切换服务端 Stub（dev server 提供，仅 AUTH_MODE=dev 时启用）
-    await request.post('/api/__test-env', { data: mode.env }).catch(() => {});
-
+  test(`${mode.name}：全流程（真实服务端分支 + 数据库断言）`, async ({ page, request }) => {
+    await request.post('/api/__test-env', { data: mode.env });
     const api = captureApi(page);
-    await installHostStub(page);
     await page.goto('/');
 
     await page.getByRole('button', { name: /开始提取/ }).click();
@@ -79,35 +89,41 @@ for (const mode of MODES) {
     if (mode.name === 'Live-stub') expect(api.extract.part.mpn).toBe('LIVESTUB');
     if (mode.name === 'Degraded') expect(api.extract.meta.mode).toBe('degraded');
 
-    // ── 修改每一类可编辑字段 ──
+    // 统一审核理由（item 6：服务端强制）
+    await page.getByPlaceholder(/对照手册/).fill('E2E：对照手册 p.63 机械图核对');
+
+    // ── 每类可编辑字段 ──
     await page.locator('.part-grid input').nth(0).fill('E2E-MPN');
     await page.locator('.part-grid input').nth(1).fill('E2E-Vendor');
     await page.locator('.part-grid input').nth(2).fill('E2E Title');
     await page.locator('.part-grid input').nth(3).fill('E2E 中文描述');
 
     await page.getByRole('button', { name: /② 管脚表/ }).click();
-    await page.locator('.pin-table input').nth(1).fill('E2E_PIN');           // 名称
-    await page.locator('.pin-table input').nth(0).fill('101');               // 编号
-    await page.locator('.pin-table input').nth(3).fill('E2E 描述');          // 描述
-    // 新增 + 删除管脚
+    await page.locator('.pin-table input').nth(1).fill('E2E_PIN');
+    await page.locator('.pin-table input').nth(0).fill('101');
+    await page.locator('.pin-table input').nth(3).fill('E2E 描述');
     await page.getByRole('button', { name: /添加管脚/ }).click();
     const lastRow = page.locator('.pin-table tbody tr').last();
     await lastRow.locator('input').nth(0).fill('900');
     await lastRow.locator('input').nth(1).fill('E2E_ADDED');
     await page.locator('.pin-table tbody tr').nth(1).getByRole('button', { name: '✕' }).click();
 
-    // 封装尺寸 + 清空可选尺寸 + landPattern
+    // item 12③：可选尺寸置 null
     await page.getByRole('button', { name: /③ 封装/ }).click();
     await page.locator('.pkg-grid input').nth(2).fill('4.85');
     const leadWidth = page.locator('.pkg-grid input').nth(7);
-    if (await leadWidth.count()) await leadWidth.fill('');                    // 置空 → null
+    await leadWidth.fill('');
 
-    // 图区：确认 + 新增 + 删除
+    // item 12②：确认 Figure 必须触发真实 figure-upload
     await page.getByRole('button', { name: /④ 图区截取/ }).click();
     const confirmBtn = page.getByRole('button', { name: /确认此图/ }).first();
-    if (await confirmBtn.count()) await confirmBtn.click();
-    const addFig = page.getByRole('button', { name: /添加图区|新增图/ }).first();
-    if (await addFig.count()) await addFig.click();
+    await expect(confirmBtn).toBeVisible({ timeout: 30_000 });
+    await confirmBtn.click();
+    await expect.poll(() => api.uploads.length, { timeout: 30_000 }).toBeGreaterThan(0);
+    const up = api.uploads[api.uploads.length - 1];
+    expect(up.jobId).toBe(jobId);
+    expect(typeof up.pngBase64).toBe('string');
+    expect(up.expectedRevision).toBeGreaterThan(0);
 
     // ── generate ──
     await page.getByRole('button', { name: /确认无误/ }).click();
@@ -115,58 +131,75 @@ for (const mode of MODES) {
     const gen = api.generate;
     expect(gen).toBeTruthy();
 
-    // ── 跨层一致性 ──
+    // ── item 12③：数据库断言 ──
     const db = readJob(jobId);
     expect(db.revision).toBe(gen.revision);
     expect(db.ir.lifecycle.state).toBe(gen.state);
-    expect(gen.manifest.revision).toBe(gen.revision);
-    expect(gen.partBundle.job.revision).toBe(gen.revision);
-    expect(gen.reviewedIr.part.mpn).toBe('E2E-MPN');
+    expect(db.manifestState).toBe(gen.state);
+    expect(db.manifest.revision).toBe(gen.revision);
     expect(db.ir.part.mpn).toBe('E2E-MPN');
-    expect(gen.partBundle.part.mpn).toBe('E2E-MPN');
-    expect(gen.files.kicadSym).toContain('"E2E-MPN"');
-    expect(gen.files.kicadSym).toContain('"E2E_ADDED"');
-    const pins = gen.reviewedIr.pinsets[0].normalizedPins;
-    expect(pins.some((p) => p.number === '900')).toBeTruthy();
+    const dbPkg = db.ir.packages[0];
+    expect(dbPkg.leadWidth).toBeNull();                       // 置 null 已写库
+    expect(dbPkg.geometryNormalized).toBe(true);
+    const dbPins = db.ir.pinsets[0].normalizedPins;
+    expect(dbPins.some((p) => p.number === '900' && p.name === 'E2E_ADDED')).toBeTruthy();
+    expect(dbPins.find((p) => p.number === '101')?.evidence?.number?.sourceType).toBe('reviewer');
+    const dbFig = db.ir.figures.find((f) => f.confirmed);
+    expect(dbFig.image?.objectKey).toBeTruthy();              // PNG 走对象存储
+    expect(dbFig.imageBase64).toBeUndefined();                // IR 不得存 base64
 
-    // ── export：ZIP 逐文件哈希校验 ──
+    // ── item 12⑤：ZIP 严格等于 Manifest ──
     const dl = page.waitForEvent('download');
     await page.getByRole('button', { name: /打包下载 ZIP/ }).click();
-    const file = await dl;
-    const zipBuf = readFileSync(await file.path());
-    const zip = await JSZip.loadAsync(zipBuf);
+    const zip = await JSZip.loadAsync(readFileSync(await (await dl).path()));
+    const zipPaths = Object.keys(zip.files).filter((p) => !zip.files[p].dir).sort();
+    const expected = gen.assetFiles.map((f) => f.path).sort();
+    expect(zipPaths).toEqual(expected);                       // 多一个文件即失败
     for (const f of gen.manifest.files) {
-      const entry = zip.file(f.path);
-      expect(entry, `ZIP 缺文件 ${f.path}`).toBeTruthy();
-      const buf = Buffer.from(await entry.async('nodebuffer'));
+      const buf = Buffer.from(await zip.file(f.path).async('nodebuffer'));
       expect(createHash('sha256').update(buf).digest('hex')).toBe(f.sha256);
     }
 
-    // ── postMessage 内容校验（含 ACK）──
-    const sendBtn = page.getByRole('button', { name: /发送到 ezPLM/ });
-    if (await sendBtn.count()) {
-      await sendBtn.click();
-      await page.waitForTimeout(500);
-      const msgs = await page.evaluate(() => window.__ds2kMessages);
-      expect(msgs.length).toBeGreaterThan(0);
-      const m = msgs[msgs.length - 1];
-      expect(m.version).toBe(3);
-      expect(m.jobId).toBe(jobId);
-      expect(m.revision).toBe(gen.revision);
-      expect(m.assetToken).toBeTruthy();
-      expect(m.manifest.files.length).toBe(gen.manifest.files.length);
-      // 必须能从消息还原全部文件字节
-      for (const e of m.files.entries) {
-        const buf = Buffer.from(e.content, e.encoding === 'base64' ? 'base64' : 'utf8');
-        expect(createHash('sha256').update(buf).digest('hex')).toBe(e.sha256);
-      }
-    }
-
-    // ── 真实 reloadJob：刷新页面并按 jobId 恢复 ──
+    // ── item 12④：reloadJob 真实恢复 ──
     await page.goto(`/?job=${jobId}`);
     await expect(page.locator('.part-grid input').first()).toHaveValue('E2E-MPN', { timeout: 30_000 });
+    expect(api.jobLoads.some((u) => u.includes(jobId))).toBeTruthy();
     const after = readJob(jobId);
     expect(after.revision).toBe(db.revision);
-    expect(after.ir.part.mpn).toBe('E2E-MPN');
   });
 }
+
+// ── item 12①：PostMessage 必须在 embed + 真实握手下测，不允许条件跳过 ──
+test('PostMessage v3：embed 模式真实握手 + 全文件字节可还原 + 宿主 ACK', async ({ page, request, baseURL }) => {
+  await request.post('/api/__test-env', { data: { MOCK_MODE: '1' } });
+  const nonce = `e2e-nonce-${Date.now()}`;
+  const hostJobId = `host-${Date.now()}`;
+  const childUrl = `${baseURL}/?embed=1`;
+  await page.setContent(HOST_HTML(childUrl, nonce, hostJobId));
+
+  const frame = page.frameLocator('#plugin');
+  await frame.getByRole('button', { name: /开始提取/ }).click();
+  await expect(frame.getByText(/器件信息确认/)).toBeVisible({ timeout: 60_000 });
+  await frame.getByPlaceholder(/对照手册/).fill('E2E postMessage');
+  await frame.getByRole('button', { name: /确认无误/ }).click();
+  await expect(frame.getByText(/在线预览/)).toBeVisible({ timeout: 60_000 });
+
+  // embed 模式下必须出现"发送到 ezPLM"，不允许跳过
+  const sendBtn = frame.getByRole('button', { name: /发送到 ezPLM/ });
+  await expect(sendBtn).toBeVisible();
+  await sendBtn.click();
+
+  await expect.poll(async () => (await page.evaluate(() => window.__received.length)), { timeout: 30_000 }).toBeGreaterThan(0);
+  const msg = (await page.evaluate(() => window.__received))[0];
+  expect(msg.version).toBe(3);
+  expect(msg.nonce).toBe(nonce);                 // 真实握手 nonce 回传
+  expect(msg.hostJobId).toBe(hostJobId);
+  expect(msg.assetToken).toBeTruthy();
+  expect(msg.manifest.files.length).toBe(msg.files.entries.length - 1);   // manifest.json 自身不入清单
+  for (const e of msg.files.entries) {
+    const buf = Buffer.from(e.content, e.encoding === 'base64' ? 'base64' : 'utf8');
+    expect(createHash('sha256').update(buf).digest('hex')).toBe(e.sha256);
+  }
+  // 宿主 ACK 已被插件收到（UI 提示）
+  await expect(frame.getByText(/收到宿主 ACK/)).toBeVisible({ timeout: 10_000 });
+});

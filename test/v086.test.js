@@ -31,12 +31,9 @@ const call = async (path, body, token = sess(), headers = {}) => {
 };
 const extract = async (headers = {}) => call('/api/extract', { pdfUrl: 'https://www.ti.com/lit/ds/symlink/x.pdf' }, sess(), headers);
 
-/** 生成一张最小合法 PNG（1x1，含 IHDR/IDAT/IEND） */
-function tinyPng() {
-  return Buffer.from(
-    '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478' +
-    '9c6360000002000154a24f5f0000000049454e44ae426082', 'hex');
-}
+import { makePng } from './helpers-png.mjs';
+/** 生成一张真实合法 PNG（严格解码器要求 CRC/IDAT 正确） */
+function tinyPng() { return makePng(4, 3); }
 
 before(async () => {
   process.env.EZPLM_JWT_SECRET = KEY;
@@ -123,25 +120,43 @@ test('反例3：管脚 Evidence 经二次清洗仍存在', () => {
   assert.equal(sets[0].normalizedPins[0].evidence.name.page, 3);
 });
 
-test('反例4：Figure 缺 Evidence 只阻断该 Figure（不影响 symbol/footprint）', () => {
+test('反例4：Figure 缺 Evidence 只阻断该 figure:<id>（不影响 symbol/footprint）', async () => {
+  const { makeAnchor, SOURCE_TYPE } = await import('../lib/evidence.js');
   const pins = Array.from({ length: 8 }, (_, i) => ({ number: String(i + 1), name: `P${i + 1}`, type: 'passive' }));
-  const pkg = sanitizePackage({ name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6, leadLength: 1, height: 1.75 });
-  const r = generateBundle({
-    part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false,
-    confirmedFigureCount: 1,
-    figures: [{ figureId: 'f_no_ev', confirmed: true }],   // 无 evidence
-    items: [{ pkg, pins }]
+  // 证据齐全的封装做基线，保证 footprint 的结论只受 Figure 因素影响
+  const mkPkg = () => {
+    const p = sanitizePackage({ name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6, leadLength: 1, height: 1.75, landPattern: { padW: 0.6, padL: 1.55, rowSpan: 5.4, sourcePage: 63 } });
+    const A = (f) => makeAnchor({ field: f, sourceType: SOURCE_TYPE.DATASHEET_DRAWING, documentSha256: 'a'.repeat(64), page: 62, bbox: [0, 0, 1, 1], extractor: 'x' });
+    p.evidence = Object.fromEntries([...p.relevantFields, 'landPattern.padW', 'landPattern.padL', 'landPattern.rowSpan'].map((f) => [f, A(f)]));
+    p.packageId = 'pkg_1';
+    return p;
+  };
+  const base = { part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false, confirmedFigureCount: 1 };
+
+  // 缺证据的 Figure
+  const bad = generateBundle({
+    ...base,
+    assetKeys: ['symbol:default', 'footprint:pkg_1', 'model3d:pkg_1', 'figure:f_no_ev'],
+    figures: [{ figureId: 'f_no_ev', confirmed: true }],
+    items: [{ pkg: mkPkg(), pins }]
   });
-  assert.ok(r.reasons.includes('field_evidence_unverified'));
-  assert.equal(r.assetPromotion.symbol, true, 'Figure 缺证据不得影响 symbol');
-  // 对照：带证据时不因图区报该错
+  assert.ok(bad.reasons.includes('figure_evidence_missing'), JSON.stringify(bad.reasons));
+  assert.equal(bad.assetKeyPromotion['figure:f_no_ev'].promotable, false, '缺证据的 figure 必须被阻断');
+  assert.equal(bad.assetKeyPromotion['footprint:pkg_1'].promotable, true, '不得影响 footprint');
+  assert.equal(bad.assetKeyPromotion['symbol:default'].promotable, true, '不得影响 symbol');
+  assert.equal(bad.assetPromotion.footprint, true);
+  assert.equal(bad.assetPromotion.symbol, true);
+
+  // 对照：带证据时该 figure 键可晋升
   const ok = generateBundle({
-    part: { mpn: 'T' }, sessionAuthenticated: true, pinsReviewRequired: false,
-    confirmedFigureCount: 1,
+    ...base,
+    assetKeys: ['symbol:default', 'footprint:pkg_1', 'figure:f'],
     figures: [{ figureId: 'f', confirmed: true, evidence: { sourceType: 'datasheet_drawing', page: 3 } }],
-    items: [{ pkg, pins }]
+    items: [{ pkg: mkPkg(), pins }]
   });
-  assert.equal(ok.assetPromotion.symbol, true);
+  assert.ok(!ok.reasons.includes('figure_evidence_missing'), JSON.stringify(ok.reasons));
+  assert.equal(ok.assetKeyPromotion['figure:f'].promotable, true);
+  assert.equal(ok.assetPromotion.figures, true);
 });
 
 test('反例5：分别批准 Symbol 与 Footprint 可以成功（资产版本级、分批）', () => {
@@ -211,7 +226,7 @@ test('反例7：页面确认 Figure 并上传 PNG 后，Manifest 中真实存在
   const inFiles = gen.data.assetFiles.find((f) => f.path === up.data.imagePath);
   assert.ok(inFiles && inFiles.encoding === 'base64' && inFiles.content, 'assetFiles 必须含 PNG 内容');
   // 非法 PNG 必须拒绝
-  const badUp = await call('/api/figure-upload', { jobId: ex.data.jobId, figureId: figId, pngBase64: Buffer.from('not a png').toString('base64') });
+  const badUp = await call('/api/figure-upload', { jobId: ex.data.jobId, figureId: figId, pngBase64: Buffer.from('not a png').toString('base64'), expectedRevision: up.data.revision });
   assert.equal(badUp.status, 422);
   assert.equal(validatePng(Buffer.from('nope')).ok, false);
 });
@@ -345,4 +360,46 @@ test('反例12：lifecycle 必须携带 expectedRevision，且 patch.approvals �
   const bad = await call('/api/generate', { jobId: ex.data.jobId, patch: { approvals: { 'symbol:default': true } } });
   assert.equal(bad.status, 400);
   assert.ok(bad.data.errors.some((e) => e.path === 'approvals'));
+});
+
+test('反例13：图集 PDF 经 /api/job-pdf 取回（跨实例一致，不依赖 HMAC 令牌）', async () => {
+  const { default: jobPdfHandler } = await import('../api/job-pdf.js');
+  const app2 = express();
+  app2.use(express.json());
+  app2.all('/api/job-pdf', (q, r) => jobPdfHandler(q, r));
+  const s2 = app2.listen(4021);
+  try {
+    // 直接在 store 里放一个带缓存 PDF 的作业（模拟 extract 的产物）
+    const pdfBytes = Buffer.from('%PDF-1.4\n% test pdf bytes\n');
+    const job = store.create({
+      ir: { part: { mpn: 'PDFJOB' }, packages: [], pinsets: [], figures: [], pdfUrl: 'https://example.com/x.pdf', pdfBase64: pdfBytes.toString('base64') },
+      tenantId: 'smoke-tenant', ownerId: 'u1'
+    });
+    const r = await fetch(`http://localhost:4021/api/job-pdf?jobId=${job.jobId}`, { headers: { Authorization: `Bearer ${sess()}` } });
+    const back = Buffer.from(await r.arrayBuffer());   // body 只能消费一次
+    assert.equal(r.status, 200, back.toString().slice(0, 200));
+    assert.equal(r.headers.get('content-type'), 'application/pdf');
+    assert.equal(back.subarray(0, 5).toString(), '%PDF-');
+    assert.equal(back.length, pdfBytes.length, '必须返回缓存的原始字节（不重复回源）');
+    // 未鉴权 → 401
+    const noAuth = await fetch(`http://localhost:4021/api/job-pdf?jobId=${job.jobId}`);
+    assert.equal(noAuth.status, 401);
+    // 跨租户 → 403
+    const other = issueDevSession({ sub: 'x', name: 'X', tenantId: 'other-tenant', roles: ['reviewer'], iss: 'https://ezplm.cn', aud: 'ds2kicad' }, KEY);
+    const cross = await fetch(`http://localhost:4021/api/job-pdf?jobId=${job.jobId}`, { headers: { Authorization: `Bearer ${other}` } });
+    assert.equal(cross.status, 403);
+    // 未知 job → 400
+    const bad = await fetch('http://localhost:4021/api/job-pdf?jobId=00000000-0000-0000-0000-000000000000', { headers: { Authorization: `Bearer ${sess()}` } });
+    assert.equal(bad.status, 400);
+    // 上传通道（local:）无可回源 URL 且无缓存 → 409 明确报错而不是静默空白
+    const localJob = store.create({
+      ir: { part: { mpn: 'L' }, packages: [], pinsets: [], figures: [], pdfUrl: 'local:x.pdf' },
+      tenantId: 'smoke-tenant', ownerId: 'u1'
+    });
+    const localRes = await fetch(`http://localhost:4021/api/job-pdf?jobId=${localJob.jobId}`, { headers: { Authorization: `Bearer ${sess()}` } });
+    assert.equal(localRes.status, 409);
+    assert.equal((await localRes.json()).code, 'pdf_unavailable');
+  } finally {
+    s2.close();
+  }
 });

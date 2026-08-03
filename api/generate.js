@@ -6,8 +6,9 @@ import { setCors } from './extract.js';
 import { getJobStore } from '../lib/jobstore.js';
 import { authenticate, authorizeJobAccess, hasRole } from '../lib/auth.js';
 import { runCanonicalPipeline } from '../lib/canonical.js';
-import { currentState, computeCanPublish, enumerateAssetKeys, isApprovalValid } from '../lib/lifecycle.js';
+import { currentState, enumerateAssetKeys, isApprovalValid, publishedAssetsTouched, forkDraft, STATE } from '../lib/lifecycle.js';
 import { signAssetToken } from '../lib/assettoken.js';
+import { getObjectStore } from '../lib/objectstore.js';
 
 const FORBIDDEN_CLIENT_FIELDS = ['part', 'items', 'pins', 'pinsets', 'packages', 'mock', 'provenance', 'fieldProvenance', 'nonPromotable', 'reviewer', 'figures', 'ir', 'lifecycle'];
 
@@ -47,29 +48,59 @@ export default async function handler(req, res) {
   }
 
   const canReview = hasRole(session, 'reviewer');
-  // item 1/2：预跑一次以确定是否有实质修改 → 决定最终 revision，再以最终值生成产物
-  const probe = runCanonicalPipeline({ job, patch, session, includeIds: patch.includePackageIds, markReviewed: canReview });
+  // item 1/2/3：预跑确定变更集与最终 revision，再以最终值生成产物
+  // item 8：从对象存储载入已确认图区的 PNG 字节（IR 中不存 base64）
+  const figureBlobs = {};
+  {
+    const oStore = getObjectStore();
+    for (const f of job.ir.figures || []) {
+      if (!f.confirmed || !f.image?.objectKey) continue;
+      const buf = await oStore.get(f.image.objectKey);
+      if (buf) figureBlobs[f.image.objectKey] = Buffer.from(buf).toString('base64');
+    }
+  }
+  const probe = runCanonicalPipeline({ job, patch, session, includeIds: patch.includePackageIds, markReviewed: canReview, figureBlobs });
   if (!probe.ok) return res.status(probe.status).json({ error: probe.error, code: probe.code, ...(probe.errors ? { errors: probe.errors } : {}) });
-  const willCommit = probe.changeLog.length > 0;
+
+  // item 4：编辑已发布资产 —— 要么拒绝，要么显式创建新 draft revision（禁止"改了但 state 仍 published"）
+  const touchedPublished = publishedAssetsTouched(job.ir, probe.changeLog);
+  if (touchedPublished.length) {
+    if (body.allowDraftFork !== true) {
+      return res.status(409).json({
+        error: `以下资产已发布，不能直接修改：${touchedPublished.join(', ')}。如需修改请带 allowDraftFork:true 创建新的 draft revision`,
+        code: 'published_asset_immutable',
+        publishedAssets: touchedPublished
+      });
+    }
+  }
+
+  // item 1：**空 Patch 也必须持久化**几何归一化后的 Final IR（首次归一化会改动 IR 内容）
+  const irChanged = JSON.stringify(job.ir) !== JSON.stringify(probe.normalizedIr);
+  const willCommit = probe.changeLog.length > 0 || irChanged || touchedPublished.length > 0;
   const finalRevision = willCommit ? job.revision + 1 : job.revision;
+  // item 4：编辑已发布资产时先 fork 出 draft（在生成之前），保证产物与最终 state 一致
+  const jobForGen = (touchedPublished.length && body.allowDraftFork === true)
+    ? { ...job, ir: forkDraft(job.ir, { actor: session.sub, reason: body.reason || 'edit published asset' }) }
+    : job;
+  const finalState = (touchedPublished.length && body.allowDraftFork === true) ? STATE.EDITED : probe.state;
   const result = runCanonicalPipeline({
-    job, patch, session,
+    job: jobForGen, patch, session,
     includeIds: patch.includePackageIds,
     markReviewed: canReview,
-    finalRevision, finalState: probe.state
+    finalRevision, finalState, figureBlobs
   });
   if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code, ...(result.errors ? { errors: result.errors } : {}) });
   let irToSave = result.normalizedIr;
   let revision = job.revision;
 
-  // item 1/12：原子提交 IR + revision + audit + manifest（含完整 manifest，而非仅摘要）
+  // item 1/3/12：原子提交 IR + revision + audit + manifest（空 Patch 但 IR 归一化有变化时同样提交）
   if (willCommit) {
     const commit = await store.commitGeneration(job.jobId, {
       ir: irToSave,
       expectedRevision: job.revision,
       actor: session.sub,
       auditEntries: [
-        { action: 'review_patch_applied', detail: { changes: result.changeLog.length, paths: result.changeLog.map((c) => c.path).slice(0, 50) } },
+        { action: result.changeLog.length ? 'review_patch_applied' : 'final_ir_normalized', detail: { changes: result.changeLog.length, paths: result.changeLog.map((c) => c.path).slice(0, 50), irNormalizedOnly: result.changeLog.length === 0 } },
         { action: 'approvals_invalidated', detail: { invalidated: result.invalidated } },
         { action: 'assets_generated', detail: { nonPromotable: result.bundle.nonPromotable, files: result.assets.allFiles.length, irHash: result.irHash } }
       ],

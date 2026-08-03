@@ -49,7 +49,7 @@ test('P0-2：missingFields 留痕 → blocked / placeholder / nonPromotable 语�
   // v0.8.5 item 5：无字段级 EvidenceAnchor 时 fail closed，故额外含 field_evidence_unverified
   assert.ok(r3.reasons.includes('approximate_parametric_3d_not_vendor_step'));
   assert.ok(r3.reasons.includes('land_pattern_derived_not_from_datasheet'));
-  assert.ok(r3.reasons.includes('field_evidence_unverified'));
+  assert.ok(r3.reasons.includes('package_field_evidence_unverified'));
   assert.ok(!r3.reasons.includes('missing_required_geometry'), '字段齐全不应报缺失');
 });
 

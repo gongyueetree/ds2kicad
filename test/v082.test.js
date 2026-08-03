@@ -246,5 +246,5 @@ test('对照：完全合规输入（手册 LP + 无变换 + 已认证 + 忽略 3
   });
   // 仅剩 approximate_3d 一条（本项目暂无厂商 STEP，这是真实且必要的阻断）
   // v0.8.5 item 5：缺字段级证据锚点 fail closed（仅 3D + 证据两条，无其他误报）
-  assert.deepEqual(r.reasons.sort(), ['approximate_parametric_3d_not_vendor_step', 'field_evidence_unverified'].sort(), JSON.stringify(r.reasons));
+  assert.deepEqual(r.reasons.sort(), ['approximate_parametric_3d_not_vendor_step', 'package_field_evidence_unverified'].sort(), JSON.stringify(r.reasons));
 });

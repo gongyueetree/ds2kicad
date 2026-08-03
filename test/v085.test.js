@@ -82,9 +82,9 @@ test('反例2：生成后 reviewedIr / 数据库 IR / Part Bundle / KiCad 完全
       schemaVersion: 'ds2kicad.review-patch.v1',
       expectedRevision: ex.data.revision,
       part: { mpn: 'CANON-1', manufacturer: 'CanonCo' },
-      packages: [{ packageId: pkgId, bodyLength: 4.2 }],
-      pinsets: [{ pinsetId: ex.data.pinsets[0].id, pins: [{ pinId, name: 'RENAMED' }] }],
-      figures: [{ figureId: figId, confirmed: true }]
+      packages: [{ packageId: pkgId, bodyLength: { value: 4.2, reason: '核对机械图' } }],
+      pinsets: [{ pinsetId: ex.data.pinsets[0].id, pins: [{ pinId, name: { value: 'RENAMED', reason: '核对' } }] }],
+      figures: [{ figureId: figId, confirmed: { value: true, reason: '已核对' } }]
     }
   }, REVIEWER());
   assert.equal(r.status, 200, JSON.stringify(r.data).slice(0, 400));
@@ -117,7 +117,7 @@ test('反例3：生成失败不得修改 Job', async () => {
   const before = store.get(jobId).job;
   // 越界数值 → 400，Job 必须原样
   const bad = await call('/api/generate', {
-    jobId, patch: { packages: [{ packageId: ex.data.packages[0].packageId, pitch: 99 }] }
+    jobId, patch: { packages: [{ packageId: ex.data.packages[0].packageId, pitch: { value: 99, reason: '越界测试' } }] }
   }, REVIEWER());
   assert.equal(bad.status, 400, JSON.stringify(bad.data));
   assert.ok(bad.data.errors.some((e) => /超出允许范围/.test(e.error)));
@@ -130,12 +130,12 @@ test('反例4：expectedRevision 过期 → 409，且不修改 Job', async () =>
   const ex = await extractViaHandler();
   const jobId = ex.data.jobId;
   const ok = await call('/api/generate', {
-    jobId, patch: { expectedRevision: 1, part: { mpn: 'FIRST' } }
+    jobId, patch: { expectedRevision: 1, part: { mpn: { value: 'FIRST', reason: '核对' } } }
   }, REVIEWER());
   assert.equal(ok.status, 200);
   assert.equal(ok.data.revision, 2);
   const stale = await call('/api/generate', {
-    jobId, patch: { expectedRevision: 1, part: { mpn: 'STALE' } }
+    jobId, patch: { expectedRevision: 1, part: { mpn: { value: 'STALE', reason: '核对' } } }
   }, REVIEWER());
   assert.equal(stale.status, 409);
   assert.equal(stale.data.code, 'revision_conflict');
@@ -197,7 +197,7 @@ test('反例7：删除 Evidence 不得反而可晋升（EvidenceGate fail closed
   // 删除全部 evidence → 必须阻断（不能"删了反而过"）
   const stripped = gen({ ...full(), evidence: {} });
   assert.equal(stripped.assetPromotion.footprint, false);
-  assert.ok(stripped.reasons.includes('field_evidence_unverified'));
+  assert.ok(stripped.reasons.includes('package_field_evidence_unverified'));
   // evidence 设为 null → 同样阻断
   const nulled = gen({ ...full(), evidence: null });
   assert.equal(nulled.assetPromotion.footprint, false);
@@ -265,26 +265,27 @@ test('反例10：Patch 数值越界直接拒绝（不 clamp）；figure/pin/evid
   const pkgId = ex.data.packages[0].packageId;
   const figId = ex.data.figures[0].figureId;
   const psId = ex.data.pinsets[0].id;
+  const revBefore = store.get(jobId).job.revision;
   const bad = [
-    [{ packages: [{ packageId: pkgId, pitch: 99 }] }, /超出允许范围/],
-    [{ packages: [{ packageId: pkgId, pinCount: 8.5 }] }, /整数/],
+    [{ packages: [{ packageId: pkgId, pitch: { value: 99, reason: 'x' } }] }, /超出允许范围/],
+    [{ packages: [{ packageId: pkgId, pinCount: { value: 8.5, reason: 'x' } }] }, /整数/],
     [{ packages: [{ packageId: pkgId, family: 'qfn' }] }, /只读/],
-    [{ figures: [{ figureId: figId, confirmed: 'yes' }] }, /boolean/],
-    [{ figures: [{ figureId: figId, page: 0 }] }, /正整数/],
-    [{ figures: [{ figureId: figId, bbox: [0.9, 0.1, 0.2, 0.5] }] }, /bbox/],
-    [{ figures: [{ figureId: figId, bbox: [0, 0, 1.2, 1] }] }, /bbox/],
-    [{ pinsets: [{ pinsetId: psId, addPins: [{ number: '99', name: 'X', evil: 1 }] }] }, /未知字段/],
-    [{ pinsets: [{ pinsetId: psId, removePins: [{ number: '1', bogus: 1 }] }] }, /未知字段/],
+    [{ figures: [{ figureId: figId, confirmed: { value: 'yes', reason: 'x' } }] }, /boolean/],
+    [{ figures: [{ figureId: figId, page: { value: 0, reason: 'x' } }] }, /正整数/],
+    [{ figures: [{ figureId: figId, bbox: { value: [0.9, 0.1, 0.2, 0.5], reason: 'x' } }] }, /bbox/],
+    [{ figures: [{ figureId: figId, bbox: { value: [0, 0, 1.2, 1], reason: 'x' } }] }, /bbox/],
+    [{ pinsets: [{ pinsetId: psId, addPins: [{ number: '99', name: 'X', reason: 'x', evil: 1 }] }] }, /未知字段/],
+    [{ pinsets: [{ pinsetId: psId, removePins: [{ number: '1', reason: 'x', bogus: 1 }] }] }, /未知字段/],
     [{ pinsets: [{ pinsetId: psId, resolveTransformations: { decision: 'accept_normalized' } }] }, /理由/],
-    [{ packages: [{ packageId: pkgId, pitch: { value: 1.0, evidence: { hack: 1 } } }] }, /evidence 未知字段/]
+    [{ packages: [{ packageId: pkgId, pitch: { value: 1.0, reason: 'x', evidence: { hack: 1 } } }] }, /evidence 未知字段/]
   ];
   for (const [patch, re] of bad) {
     const r = await call('/api/generate', { jobId, patch }, REVIEWER());
     assert.equal(r.status, 400, `${JSON.stringify(patch)} → ${r.status}`);
     assert.ok(r.data.errors.some((e) => re.test(e.error)), `${JSON.stringify(patch)} → ${JSON.stringify(r.data.errors)}`);
   }
-  // Job 未被任何一次非法请求修改
-  assert.equal(store.get(jobId).job.revision, 1);
+  // Job 未被任何一次非法请求修改（v0.8.7：以请求前的 revision 为基准，因为空 Patch 也会归一化提交）
+  assert.equal(store.get(jobId).job.revision, revBefore, '非法 Patch 不得改变 revision');
 });
 
 test('反例11：畸形 Cookie 不得抛异常，exp/nbf 只接受有限整数', async () => {

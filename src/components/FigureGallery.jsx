@@ -20,7 +20,13 @@ export default function FigureGallery({ pdfUrl, figures }) {
           const key = `${f.page}|${f.bbox.join(',')}`;
           if (thumbs[key]) continue;
           const page = Math.min(Math.max(1, f.page), doc.numPages);
-          const { canvas } = await renderPage(doc, page, 1200);
+          let canvas;
+          try {
+            ({ canvas } = await renderPage(doc, page, 1200));
+          } catch (e) {
+            setDiag((prev) => ({ ...prev, [key]: { page, bbox: f.bbox, error: `第 ${page} 页渲染失败：${e.message}` } }));
+            continue;
+          }
           const url = cropToDataUrl(canvas, f.bbox, 1);
           if (dead) return;
           // 诊断：检测裁剪结果是否近乎全白（bbox 落在空白区/页码错位的典型表现）
@@ -44,7 +50,7 @@ export default function FigureGallery({ pdfUrl, figures }) {
         }
         setStatus('');
       } catch (e) {
-        if (!dead) setStatus(`图集渲染失败：${e.message}`);
+        if (!dead) setStatus(`图集渲染失败：${e.message}（请检查 /api/job-pdf 是否返回 200）`);
       }
     })();
     return () => { dead = true; };
@@ -64,6 +70,9 @@ export default function FigureGallery({ pdfUrl, figures }) {
                 ? <img src={thumbs[key]} alt={f.title} loading="lazy" />
                 : <div className="stage-empty">渲染中…</div>}
               <figcaption>
+                {diag[key]?.error && (
+                  <span className="src-badge src-fallback">⚠ {diag[key].error}</span>
+                )}
                 {diag[key]?.blank && (
                   <span className="src-badge src-fallback" title={`page=${diag[key].page}/${diag[key].pageCount} bbox=${JSON.stringify(diag[key].bbox)}`}>
                     ⚠ 裁剪区域为空白（p.{diag[key].page}，bbox {diag[key].bbox.map((n) => n.toFixed(2)).join(',')}）— 请在 ④ 重新框选

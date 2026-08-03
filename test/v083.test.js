@@ -64,8 +64,8 @@ test('E2E-1：修改 MPN/管脚/LandPattern 后 Canonical IR、KiCad 与 Part Bu
     patch: {
       schemaVersion: 'ds2kicad.review-patch.v1',
       part: { mpn: { value: 'NEWMPN-9', reason: '对照封面', evidence: { page: 1 } } },
-      pinsets: [{ pinsetId: 'default', pins: [{ number: '3', name: { value: 'VREF', reason: '手册 p.5' }, type: 'input' }] }],
-      packages: [{ packageId: 'pkg_1', landPattern: { padW: 0.6, padL: 1.55, rowSpan: 5.4 } }]
+      pinsets: [{ pinsetId: 'default', pins: [{ number: '3', name: { value: 'VREF', reason: '手册 p.5' }, type: { value: 'input', reason: '手册 p.5' } }] }],
+      packages: [{ packageId: 'pkg_1', landPattern: { padW: { value: 0.6, reason: '手册 p.63' }, padL: { value: 1.55, reason: '手册 p.63' }, rowSpan: { value: 5.4, reason: '手册 p.63' } } }]
     }
   }, token);
   assert.equal(r.status, 200, JSON.stringify(r.data));
@@ -146,14 +146,14 @@ test('E2E-5：重复封装名称仍可通过稳定 ID 独立修改', async () =>
   const token = sess({ sub: 'u-owner', tenantId: 't1', roles: ['reviewer'] });
   const r = await post({
     jobId: job.jobId,
-    patch: { packages: [{ packageId: 'pkg_2', bodyLength: 6.2 }] }
+    patch: { packages: [{ packageId: 'pkg_2', bodyLength: { value: 6.2, reason: '核对机械图' } }] }
   }, token);
   assert.equal(r.status, 200, JSON.stringify(r.data));
   const [p1, p2] = r.data.reviewedIr.packages;
   assert.equal(p1.bodyLength, 4.9, '第一个同名封装不应被改动');
   assert.equal(p2.bodyLength, 6.2, '第二个同名封装按 ID 精确修改');
   // 名称做主键会被拒绝
-  const byName = await post({ jobId: job.jobId, patch: { packages: [{ name: 'SOIC-8', bodyLength: 7 }] } }, token);
+  const byName = await post({ jobId: job.jobId, patch: { packages: [{ name: 'SOIC-8', bodyLength: { value: 7, reason: 'x' } }] } }, token);
   assert.equal(byName.status, 400);
   assert.ok(byName.data.errors.some((e) => /packageId/.test(e.error)));
 });

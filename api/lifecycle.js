@@ -58,48 +58,67 @@ export default async function handler(req, res) {
     if (!reason || String(reason).trim().length < 2) return res.status(400).json({ error: '必须提供理由', code: 'reason_required' });
   }
 
-  // approve / publish 前重新跑 Canonical 流程，绑定当前 revision/irHash/manifestHash/assetHash
+  // item 3：pipeline 顺序 —— 先 transition 得到最终 state，再确定最终 revision，
+  // 然后基于**跃迁后的 IR** 生成 manifest（禁止用跃迁前 IR），最后单事务提交。
+  const finalRevision = job.revision + 1;          // lifecycle 动作必然产生新 revision
+  const t0 = transition(job.ir, action, { actor: session.sub, role: requiredRole, reason, assets });
+  if (!t0.ok) return res.status(409).json({ error: t0.error, code: t0.code, from: t0.from });
+  const transitionedIr = t0.ir;
+
+  // item 3：**所有** lifecycle 动作都基于跃迁后的 IR 重新生成 manifest（禁止用跃迁前 IR）
   let pipe = null, assetHashes = {}, manifestHash = null, thisIrHash = null;
-  if (action === 'approve' || action === 'publish') {
-    pipe = runCanonicalPipeline({ job, patch: {}, session, includeIds: null, markReviewed: false, finalRevision: job.revision, finalState: currentState(job.ir) });
+  if (action !== 'revoke') {
+    pipe = runCanonicalPipeline({
+      job: { ...job, ir: transitionedIr, revision: finalRevision },
+      patch: {}, session, includeIds: null, markReviewed: false,
+      finalRevision, finalState: t0.to
+    });
     if (!pipe.ok) return res.status(pipe.status).json({ error: pipe.error, code: pipe.code, errors: pipe.errors });
-    const promo = pipe.bundle.assetPromotion || {};
-    const kindOf = (k) => { const kind = parseAssetKey(k).kind; return kind === 'figure' ? 'figures' : kind; };
-    const blocked = assets.filter((a) => promo[kindOf(a)] !== true);
-    if (blocked.length) {
+    // item 5：按**具体资产键**判定，而不是按种类
+    const byKey = pipe.bundle.assetKeyPromotion || {};
+    const blocked = (assets || []).filter((a) => byKey[a]?.promotable !== true);
+    if (blocked.length && (action === 'approve' || action === 'publish')) {
       return res.status(409).json({
         error: `以下资产未通过晋升闸门，不能 ${action}：${blocked.join(', ')}`,
         code: 'asset_not_promotable',
-        assetBlockReasons: pipe.bundle.assetBlockReasons
+        assetBlockReasons: pipe.bundle.assetBlockReasons,
+        assetKeyPromotion: pipe.bundle.assetKeyPromotion
       });
     }
-    thisIrHash = pipe.irHash;
-    manifestHash = createHash('sha256').update(JSON.stringify(pipe.assets.manifest)).digest('hex');
-    assetHashes = computeAssetHashes(pipe, assets);
+    if (assets?.length) assetHashes = computeAssetHashes(pipe, assets);
     if (action === 'publish') {
-      // item 3：批准必须仍然有效（绑定 revision + irHash）
-      const invalid = assets.filter((a) => !isApprovalValid(job.ir, a, { revision: job.revision, irHash: thisIrHash }));
+      // item 2/3：批准记录存在即有效 —— 编辑会通过 invalidateAffectedApprovals 主动删除受影响批准，
+      // 因此这里只需检查记录是否仍在（不能拿当前 irHash 比对：approve 动作本身会改变 IR hash）
+      const invalid = assets.filter((a) => !isApprovalValid(job.ir, a));
       if (invalid.length) {
         return res.status(409).json({ error: `以下资产尚未 approve 或批准已因编辑失效：${invalid.join(', ')}`, code: 'asset_not_approved' });
       }
     }
   }
 
-  const t = transition(job.ir, action, { actor: session.sub, role: requiredRole, reason, assets });
-  if (!t.ok) return res.status(409).json({ error: t.error, code: t.code, from: t.from });
-  let nextIr = t.ir;
+  const t = t0;
+  let nextIr = transitionedIr;
+  let assetVersionRows = [];
+  // item 2：Approval 绑定**事务提交后的最终 revision**（finalRevision），
+  // 避免"保存后立刻因 revision+1 而失效"。
   if (action === 'approve') {
-    nextIr = approveAssets(nextIr, { keys: assets, actor: session.sub, revision: job.revision, irHash: thisIrHash, manifestHash, assetHashes, reason });
+    nextIr = approveAssets(nextIr, { keys: assets, actor: session.sub, revision: finalRevision, irHash: thisIrHash, manifestHash, assetHashes, reason });
   } else if (action === 'publish') {
-    // item 4：发布创建不可变 AssetVersion
-    nextIr = publishAssets(nextIr, { keys: assets, actor: session.sub, revision: job.revision, irHash: thisIrHash, manifestHash, assetHashes, manifest: pipe.assets.manifest });
+    nextIr = publishAssets(nextIr, { keys: assets, actor: session.sub, revision: finalRevision, irHash: thisIrHash, manifestHash, assetHashes, manifest: pipe.assets.manifest });
+    // item 10：AssetVersion 保存**资产专属文件**（不是整包）
+    assetVersionRows = assets.map((key) => ({
+      assetKey: key, revision: finalRevision, versionId: `${key}@r${finalRevision}`,
+      irHash: thisIrHash, manifestHash, assetHash: assetHashes[key] || null, publishedBy: session.sub,
+      files: filesForAsset(pipe, key)
+    }));
   }
 
-  // item 12：Lifecycle 与 Manifest/AssetVersion 全部在同一事务提交
+  // item 12：Lifecycle + Manifest + AssetVersion 单事务提交
   const commit = await store.commitGeneration(job.jobId, {
     ir: nextIr, expectedRevision: job.revision, actor: session.sub,
-    auditEntries: [{ action: `lifecycle_${action}`, detail: { from: t.from, to: t.to, assets, reason, irHash: thisIrHash, manifestHash } }],
-    manifest: pipe?.assets?.manifest || null
+    auditEntries: [{ action: `lifecycle_${action}`, detail: { from: t.from, to: t.to, assets, reason, irHash: thisIrHash, manifestHash, approvalRevision: finalRevision } }],
+    manifest: pipe?.assets?.manifest || null,
+    assetVersions: assetVersionRows
   });
   if (!commit.ok) return res.status(409).json({ error: commit.error, code: commit.code, currentRevision: commit.currentRevision });
 
@@ -111,6 +130,8 @@ export default async function handler(req, res) {
     state: currentState(commit.job.ir),
     lifecycle: commit.job.ir.lifecycle,
     assetVersions: commit.job.ir.assetVersions || [],
+    manifest: pipe?.assets?.manifest || null,
+    irHash: thisIrHash,
     approvals: commit.job.ir.lifecycle?.approvals || {},
     published: commit.job.ir.lifecycle?.published || {}
   });
@@ -123,7 +144,7 @@ function computeAssetHashes(pipe, keys) {
   for (const key of keys) {
     const { kind, id } = parseAssetKey(key);
     if (kind === 'symbol') {
-      const sym = pipe.bundle.symbols.find((s) => (pipe.normalizedIr.packages || []).some((p) => p.pinsetId === id && p.name && s.packages?.includes(p.name)));
+      const sym = pipe.bundle.symbols.find((s) => s.pinsetIds?.includes(id));   // item 13：按 pinsetId 匹配
       out[key] = sha(sym?.legacyLib || pipe.bundle.files.kicadSym);
     } else if (kind === 'footprint' || kind === 'model3d') {
       const it = pipe.bundle.items.find((x) => x.packageId === id);
@@ -137,3 +158,25 @@ function computeAssetHashes(pipe, keys) {
 }
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+
+/** item 10：某个资产版本对应的**专属文件**（而非整包） */
+function filesForAsset(pipe, key) {
+  const { kind, id } = parseAssetKey(key);
+  const all = pipe.assets.allFiles || pipe.assets.files;
+  const pick = (p) => all.filter((f) => f.path === p).map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, objectKey: f.objectKey || null, contentType: f.contentType || null }));
+  if (kind === 'symbol') {
+    const sym = pipe.bundle.symbols.find((s2) => s2.pinsetIds?.includes(id));   // item 13：按 pinsetId 匹配
+    return [...pick(pipe.assets.partBundle.symbols?.[0]?.legacyPath || `${sym?.name}.lib`), ...pick(pipe.bundle.names.kicadSym)];
+  }
+  if (kind === 'footprint' || kind === 'model3d') {
+    const it = pipe.bundle.items.find((x) => x.packageId === id);
+    if (!it) return [];
+    return pick(kind === 'footprint' ? it.names.kicadMod : it.names.wrl);
+  }
+  if (kind === 'figure') {
+    const f = (pipe.normalizedIr.figures || []).find((x) => x.figureId === id);
+    return f?.imagePath ? pick(f.imagePath) : [];
+  }
+  return [];
+}

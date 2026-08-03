@@ -14,7 +14,10 @@ export function setLocalPdf(name, data) {
 }
 
 let pdfToken = null;
+let jobId = null;
 export function setPdfToken(t) { pdfToken = t || null; }
+/** v0.8.6：按 jobId 取回 PDF（多实例一致 + 复用已下载字节），替代跨实例令牌方案 */
+export function setJobId(id) { jobId = id || null; }
 
 export async function loadPdf(pdfUrl) {
   if (cache.url === pdfUrl && cache.doc) return cache.doc;
@@ -24,7 +27,9 @@ export async function loadPdf(pdfUrl) {
     // pdf.js 会转移(transfer) ArrayBuffer 所有权，必须拷贝一份，否则第二次加载报 detached
     doc = await pdfjsLib.getDocument({ data: localPdf.data.slice(0) }).promise;
   } else {
-    const proxied = `/api/fetch-pdf?url=${encodeURIComponent(pdfUrl)}${pdfToken ? `&token=${encodeURIComponent(pdfToken)}` : ''}`;
+    const proxied = jobId
+      ? `/api/job-pdf?jobId=${encodeURIComponent(jobId)}`
+      : `/api/fetch-pdf?url=${encodeURIComponent(pdfUrl)}${pdfToken ? `&token=${encodeURIComponent(pdfToken)}` : ''}`;
     doc = await pdfjsLib.getDocument({ url: proxied }).promise;
   }
   cache = { url: pdfUrl, doc };
