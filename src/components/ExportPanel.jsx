@@ -119,6 +119,13 @@ export default function ExportPanel({ bundle, confirmed, pdfUrl, embedded, sessi
         {embedded && <button className="btn-primary" onClick={sendToEzplm}>↗ 发送到 ezPLM（postMessage）</button>}
       </div>
       <p className="hint">图区：已确认 {okFigs.length} / {confirmed.figures.length} 张将随导出打包{okFigs.length < confirmed.figures.length ? '（未确认的不导出，请回 ④ 确认）' : ''}</p>
+      <div className={bundle.nonPromotable ? 'warn-box' : 'hint'} style={{ marginTop: 10 }}>
+        <p>
+          <b>晋升状态：{bundle.nonPromotable ? '不可晋升为正式资产' : '可晋升'}</b>
+          {bundle.reviewer ? `　审核者：${bundle.reviewer.name}` : '　（无已认证会话）'}
+        </p>
+        {(bundle.reasons || []).map((r, i) => <p key={i}>· {r}</p>)}
+      </div>
       {busy && <p className="status-line">{busy}</p>}
       {bundle.warnings?.length > 0 && (
         <div className="warn-box">

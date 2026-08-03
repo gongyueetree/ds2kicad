@@ -1,6 +1,9 @@
 // test/smoke.mjs — 单进程端到端冒烟：启动 dev API → 自请求 → 校验 → 退出
 process.env.MOCK_MODE = '1';
 process.env.PORT = '3123';
+process.env.AUTH_MODE = 'dev';
+process.env.JOB_SECRET = 'smoke-secret';
+process.env.PDF_TOKEN_SECRET = 'smoke-pdf-secret';
 import express from 'express';
 import extractHandler from '../api/extract.js';
 import generateHandler from '../api/generate.js';
@@ -61,33 +64,33 @@ try {
   const bad2 = await post('/api/extract', { pdfUrl: 'ftp://x.com/a.pdf' });
   check('非 http 拒绝 400', bad2.status === 400);
 
-  // 3. 提取 → 生成 回环（新形状：多封装批量）
-  const sets = Object.fromEntries(ex.data.pinsets.map((s2) => [s2.id, s2.pins]));
-  const payload = {
-    part: ex.data.part,
-    items: ex.data.packages.map((p) => ({ pkg: p, pins: sets[p.pinsetId] }))
-  };
-  const gen = await post('/api/generate', payload);
+  // 3. 提取 → 生成 回环（v0.8.2 契约：只提交 jobId + patch）
+  check('extract 返回 jobId', typeof ex.data.jobId === 'string' && ex.data.jobId.length > 20);
+  const gen = await post('/api/generate', { jobId: ex.data.jobId, patch: {} });
   check('generate 200', gen.status === 200, JSON.stringify(gen.data.error || ''));
-  check('bundle 两个封装 items', gen.data.items?.length === 2);
+  check('bundle 两个封装 items', gen.data.items?.length === 2, JSON.stringify(gen.data.error || ''));
+  check('mock 由服务端恢复且不可晋升', gen.data.mock === true && gen.data.nonPromotable === true);
+  const rejected = await post('/api/generate', { jobId: ex.data.jobId, part: { mpn: 'FAKE' } });
+  check('客户端提交 part 被拒绝', rejected.status === 400 && rejected.data.code === 'client_authoritative_fields_rejected');
   check('bundle 两个符号变体（EP 差异）', gen.data.symbols?.length === 2, gen.data.symbols?.map((s2) => s2.name).join());
   check('bundle 合并库文件名', gen.data.names?.kicadSym === 'TMUXL27518.kicad_sym', gen.data.names?.kicadSym);
   const padCount = (gen.data.items[0].files.kicadMod.match(/\(pad "/g) || []).length;
   check('QFN-24 焊盘 24+EP', padCount === 25, `实际 ${padCount}`);
   check('每封装均有封装+3D', gen.data.items.every((it) => it.files.kicadMod && it.files.wrl));
-  // 旧形状兼容
+  // v0.8.2：旧形状（直接提交 part/pkg/pins）必须被拒绝
   const old = await post('/api/generate', { part: ex.data.part, pkg: ex.data.packages[0], pins: ex.data.pins });
-  check('旧形状单封装兼容', old.status === 200 && old.data.files?.kicadSym?.length > 100);
+  check('旧形状被拒绝（无绕过路径）', old.status === 400, JSON.stringify(old.data));
 
-  // 4. 空管脚 → 422
-  const empty = await post('/api/generate', { part: { mpn: 'X' }, pkg: ex.data.packages[0], pins: [] });
-  check('空管脚返回 422', empty.status === 422);
+  // 4. 非法 jobId → 400
+  const badJob = await post('/api/generate', { jobId: 'forged.sig', patch: {} });
+  check('伪造 jobId 返回 400', badJob.status === 400 && badJob.data.code === 'invalid_job');
 
   // 5. 非法 JSON 请求体
   const rawResp = await fetch('http://localhost:3123/api/generate', {
     method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: 'not json'
   });
   check('非 JSON 请求体不 500', rawResp.status !== 500, `status ${rawResp.status}`);
+  check('mock 响应含 pdfToken（item 9）', typeof ex.data.pdfToken === 'string' && ex.data.pdfToken.length > 10);
 } finally {
   srv.close();
 }

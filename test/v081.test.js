@@ -76,9 +76,10 @@ test('BGA / QFN-10 / 管脚2-封装8 / 超范围尺寸 均不可晋升', () => {
   assert.equal(dup.nonPromotable, true);
   assert.ok(dup.reasons.includes('pin_count_or_number_conflict'));
 
-  // 对照：全齐真实值 → 可晋升（证明闸门不是恒真）
+  // 对照：全齐真实值 → 仅剩 v0.8.2 的推导/近似类阻断（证明闸门不是恒真、不误报缺失）
   const ok = generateBundle({ part: { mpn: 'F' }, items: [{ pkg: GOOD_SOIC, pins: pins(8) }] });
-  assert.equal(ok.nonPromotable, false, JSON.stringify(ok.reasons));
+  assert.ok(!ok.reasons.includes('missing_required_geometry'));
+  assert.ok(!ok.reasons.includes('pin_count_or_number_conflict'));
 });
 
 test('3x2mm 矩形 DFN：X/Y 焊盘坐标不同（bodyWidth/bodyLength 分轴）', () => {
@@ -165,7 +166,8 @@ test('item 10：人工修改产生 reviewer provenance 并重算 missingFields',
   assert.equal(signed.fieldProvenance.pitch.reviewer, 'gongyusu');
   assert.deepEqual(signed.missingFields, [], '署名修改后不再缺失');
   const b1 = generateBundle({ part: { mpn: 'X' }, items: [{ pkg: signed, pins: pins(8) }] });
-  assert.equal(b1.nonPromotable, false, JSON.stringify(b1.reasons));
+  assert.ok(!b1.reasons.includes('missing_required_geometry'), JSON.stringify(b1.reasons));
+  assert.ok(!b1.reasons.includes('reviewer_edit_without_provenance'));
   // 无署名 → 该字段仍视为未验证
   const unsigned = applyReviewerEdit(p0, 'pitch', 1.27, '');
   assert.ok(unsigned.missingFields.includes('pitch'));
@@ -184,4 +186,5 @@ test('item 4：提示词中不存在任何估算/JEDEC nominal 指令', () => {
   assert.ok(/NEVER estimate/i.test(src), '必须包含明确禁令');
   // Schema 中不得出现可被当作缺省值抄写的示例数字
   assert.ok(!/"pitch": 1\.27/.test(src) && !/"bodyLength": 4\.9/.test(src), 'schema 不得含示例数字');
+  assert.ok(!/EXTRACT_PROMPT\s*=/.test(src), 'v0.8.2：旧全量提示词必须删除');
 });

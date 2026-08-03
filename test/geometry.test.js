@@ -45,15 +45,17 @@ test('DIP 孔距小于本体宽 → 标准值', () => {
   assert.equal(p.rowSpan, 7.62);
 });
 
-test('LCCC/PLCC 家族映射为 qfn（四边）', () => {
-  assert.equal(guessFamily('LCCC'), 'qfn');
-  assert.equal(guessFamily('PLCC'), 'qfn');
-  // LCCC-20：每边 5 脚，四边生成 20 焊盘
-  const w = [];
-  const p = normalizeGeometry({ name: 'LCCC-20', family: 'qfn', pinCount: 20, pitch: 1.27, bodyLength: 8.89, bodyWidth: 8.89, leadLength: 1.0, height: 2.0 }, w);
-  const mod = generateFootprint({ mpn: 'LM358', pkg: p });
-  const pads = [...mod.matchAll(/\(pad "(\d+)" smd/g)];
-  assert.equal(pads.length, 20);
+test('LCCC/PLCC 为不受支持家族 lcc（v0.8.2：不再按 QFN 近似）', async () => {
+  assert.equal(guessFamily('LCCC'), 'lcc');
+  assert.equal(guessFamily('PLCC'), 'lcc');
+  // 生成端必须拒绝，不得产出可发布封装
+  const { generateBundle } = await import('../lib/kicadgen/index.js');
+  const { sanitizePackage } = await import('../lib/validate.js');
+  const pkg = sanitizePackage({ name: 'LCCC-20', type: 'LCCC', pinCount: 20, pitch: 1.27, bodyLength: 8.89, bodyWidth: 8.89, leadLength: 1.0, height: 2.0 });
+  assert.equal(pkg.familySupported, false);
+  const r = generateBundle({ part: { mpn: 'LM358' }, items: [{ pkg, pins: Array.from({ length: 20 }, (_, i) => ({ number: String(i + 1), name: 'P' + i, type: 'passive' })) }] });
+  assert.equal(r.items[0].files.kicadMod, undefined);
+  assert.equal(r.nonPromotable, true);
 });
 
 test('QFN 本体放不下每边引脚 → 派生', () => {

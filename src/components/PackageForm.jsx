@@ -23,7 +23,7 @@ const setLp = (pkg, onChange, k, v) => {
   onChange({ ...pkg, landPattern: lp });
 };
 
-export default function PackageForm({ packages, selectedIndex, pkg, pinsets = [], reviewer, onSelect, onChange }) {
+export default function PackageForm({ packages, selectedIndex, pkg, pinsets = [], onSelect, onChange }) {
   const upd = (key, raw) => {
     const value = raw === '' ? null : Number(raw);
     onChange({ ...pkg, [key]: Number.isFinite(value) ? value : (raw === '' ? null : pkg[key]) });

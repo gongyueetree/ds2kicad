@@ -3,24 +3,22 @@
 // 上传通道受 Vercel 请求体 4.5MB 限制：原始 PDF ≤3MB（base64 膨胀 ~37%）
 // 三态外部依赖开关（.env 控制，与 AltPart AI 同款模式）：
 //   GEMINI_API_KEY 未配置或 MOCK_MODE=1 → 返回内置 TMUXL27518 演示数据（mock:true）
-import { validatePdfUrl, sanitizePins, sanitizePinsets, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
+import { validatePdfUrl, sanitizePins, sanitizePinsDetailed, sanitizePinsets, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
 import { extractWithGemini } from '../lib/gemini.js';
 import { signPdfToken } from '../lib/pdftoken.js';
+import { sealJob } from '../lib/jobstore.js';
+import { authenticate } from '../lib/auth.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
-
-/** P0-6：可选 Bearer Token（设置 API_TOKEN 后强制）；正式多租户认证由 ezPLM 网关承担 */
-export function checkAuth(req) {
-  const t = process.env.API_TOKEN;
-  if (!t) return true;
-  return (req.headers?.authorization || '') === `Bearer ${t}`;
-}
 
 export default async function handler(req, res) {
   const t0 = Date.now();
   const budgetMs = Number(process.env.EXTRACT_BUDGET_MS || 50000); // 平台 60s 上限内主动收口
   const remain = () => budgetMs - (Date.now() - t0);
   setCors(res, req);
-  if (req.method !== 'OPTIONS' && !checkAuth(req)) return res.status(401).json({ error: '未授权（需要 Bearer API_TOKEN）' });
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  const auth = authenticate(req);          // item 10：ezPLM 会话鉴权，浏览器不持密钥
+  if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+  const session = auth.session;
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
@@ -57,10 +55,23 @@ export default async function handler(req, res) {
     });
   }
   if (mockAllowed) {
+    const mockIr = {
+      part: MOCK_TMUXL27518.part,
+      packages: MOCK_TMUXL27518.packages,
+      pinsets: MOCK_TMUXL27518.pinsets,
+      figures: MOCK_TMUXL27518.figures,
+      mock: true,                       // 服务端权威，客户端无法删除
+      tenantId: session.tenantId,
+      pdfUrl: v.url
+    };
+    const sealed = sealJob(mockIr);
     return res.status(200).json({
       ...MOCK_TMUXL27518,
-      non_promotable: true, // P0-3：演示数据不可晋升为正式资产
+      jobId: sealed.jobId,
+      mock: true,
+      non_promotable: true,
       packages: MOCK_TMUXL27518.packages.map((p) => ({ ...p, family: guessFamily(p.type) })),
+      pdfToken: uploaded ? null : signPdfToken(v.url), // item 9：mock 响应同样提供 PDF 访问方式
       meta: { mode: 'mock', reason: 'MOCK_MODE=1', pdfUrl: v.url }
     });
   }
@@ -122,6 +133,7 @@ export default async function handler(req, res) {
           docProfile = { pdfType: 'unknown', error: e.message };
         }
       }
+      var ocrResult = null; // item 12：OCR 路由结果（含 mustKeepPages）
       const { findPartInfo, parsePinTable, findFigures, selectRelevantPages, assignPinsets } = await import('../lib/heuristics.js');
       const { pages } = await extractTextPages(pdfBuf);
       const totalText = pages.reduce((n, p) => n + p.lines.length, 0);
@@ -129,8 +141,14 @@ export default async function handler(req, res) {
         const pi = findPartInfo(pages, v.url);
         const pt = parsePinTable(pages);
         const figs = findFigures(pages);
+        // item 12：需 OCR 的页面走 OCR Worker；无 Worker 时也绝不丢弃这些页
+        if (docProfile?.pagesNeedingOcr?.length) {
+          const { routeOcr } = await import('../lib/ocr/router.js');
+          ocrResult = await routeOcr(pdfBuf, { profile: docProfile, textPages: pages });
+        }
         det = {
           textOk: true,
+          ocr: ocrResult ? { status: ocrResult.status, ocrPages: ocrResult.ocrPages, mustKeepPages: ocrResult.mustKeepPages, note: ocrResult.note } : null,
           textPages: pages.map((pg) => ({ page: pg.page, text: pg.lines.map((l) => l.text).join('\n').slice(0, 4000) })),
           part: pi.ok ? pi.part : null,
           pins: pt.pins,
@@ -182,6 +200,11 @@ export default async function handler(req, res) {
           sliceStrategy = 'scanned_no_ocr_worker';
         }
       }
+      // item 12：需 OCR 的页（常含机械图）无论选页策略如何都必须保留
+      if (det.ocr?.mustKeepPages?.length && pagesToUse.length) {
+        pagesToUse = [...new Set([...pagesToUse, ...det.ocr.mustKeepPages])].sort((a, b) => a - b);
+        sliceStrategy += '+ocr_must_keep';
+      }
       if (pagesToUse.length) {
         const s = await slicePdf(pdfBuf, pagesToUse);
         if (s) { geminiBuf = s.buf; sliced = true; pageMap = s.pageMap; }
@@ -227,7 +250,9 @@ export default async function handler(req, res) {
         }
       : det.part;
     const recSet = pinsets.find((s2) => s2.id === packages[idx].pinsetId) || pinsets[0];
-    const pins = recSet ? recSet.pins : [];
+    const recDet = sanitizePinsDetailed(recSet ? recSet.pins : []);
+    const pins = recDet.pins;
+    const pinsReviewRequired = recDet.reviewRequired;
     const { filterFiguresDetailed } = await import('../lib/figfilter.js');
     const figFiltered = filterFiguresDetailed(
       need.figures ? sanitizeFigures(raw?.figures) : sanitizeFigures(det.figures),
@@ -242,6 +267,8 @@ export default async function handler(req, res) {
       recommendedPackageIndex: idx,
       pins,
       pinsets,
+      pinTransformationLog: recDet.transformationLog,
+      pinsReviewRequired,
       figures,
       figureCandidates: figFiltered.rejected, // 被过滤候选（含原因），供审核复活，不默认展示
       sources: {
@@ -250,6 +277,14 @@ export default async function handler(req, res) {
         pins: need.pins ? 'gemini' : 'parser',
         figures: need.figures ? 'gemini' : 'parser'
       },
+      jobId: sealJob({
+        part, packages, pinsets, figures,
+        recommendedPackageIndex: idx,
+        mock: false,
+        pinsReviewRequired: pinsReviewRequired,
+        tenantId: session.tenantId,
+        pdfUrl: v.url
+      }).jobId,
       pdfToken: uploaded ? null : signPdfToken(v.url), // 供前端图区裁剪经受控端点取回
       meta: {
         mode: 'live',
@@ -259,6 +294,7 @@ export default async function handler(req, res) {
         strategy: det.textOk ? (need.pins ? 'hybrid' : 'parser-first') : 'gemini-full',
         sliceStrategy,
         docProfile: docProfile ? { pdfType: docProfile.pdfType, confidence: docProfile.confidence, ocrPageCount: (docProfile.pagesNeedingOcr || []).length } : null,
+        ocr: det.ocr || null,
         pinConfidence: det.pinConfidence
       }
     });
@@ -273,6 +309,14 @@ export default async function handler(req, res) {
         pins: sanitizePins(det.pins),
         pinsets: sanitizePinsets(det.pinsets, det.pins),
         figures: (await import('../lib/figfilter.js')).filterFigures(sanitizeFigures(det.figures), { pkgCount: 1 }),
+        jobId: sealJob({
+          part: det.part || { mpn: 'UNKNOWN' },
+          packages: [sanitizePackage({ pinCount: det.pins.length })],
+          pinsets: sanitizePinsets(det.pinsets, det.pins),
+          figures: sanitizeFigures(det.figures),
+          mock: false, degraded: true, tenantId: session.tenantId, pdfUrl: v.url
+        }).jobId,
+        pdfToken: uploaded ? null : signPdfToken(v.url), // item 9：degraded 响应同样提供 PDF 访问方式
         sources: { part: 'parser', packages: 'fallback', pins: 'parser', figures: 'parser' },
         meta: { mode: 'degraded', warning: `AI 不可用（${e.message}），封装尺寸为默认值，请手工核对`, pdfUrl: v.url, pdfBytes: pdfBuf.length }
       });

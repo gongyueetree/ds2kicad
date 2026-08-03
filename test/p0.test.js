@@ -43,9 +43,11 @@ test('P0-2：missingFields 留痕 → blocked / placeholder / nonPromotable 语�
   assert.equal(r2.items[0].placeholder, true);
   assert.equal(r2.nonPromotable, true);
   // 全齐且无先验修正 → 可晋升
+  // v0.8.2：即使字段齐全，无手册 land pattern + 参数化 WRL 仍不可晋升（真实性要求）
   const full = sanitizePackage({ name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, leadSpan: 6.0, height: 1.75 });
   const r3 = generateBundle({ part: { mpn: 'X' }, items: [{ pkg: full, pins: pins8 }] });
-  assert.equal(r3.nonPromotable, false, JSON.stringify(r3.items[0].warnings));
+  assert.deepEqual(r3.reasons.sort(), ['approximate_parametric_3d_not_vendor_step', 'land_pattern_derived_not_from_datasheet'].sort());
+  assert.ok(!r3.reasons.includes('missing_required_geometry'), '字段齐全不应报缺失');
 });
 
 test('P0-4：私网/保留 IP 判定与单跳 URL 校验', () => {
