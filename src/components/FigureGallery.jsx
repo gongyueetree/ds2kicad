@@ -33,14 +33,34 @@ export default function FigureGallery({ pdfUrl, figures, onChange, onRecrop }) {
           const page = Math.min(Math.max(1, f.page), doc.numPages);
           let canvas;
           try {
-            ({ canvas } = await renderPage(doc, page, 1400));
+            ({ canvas } = await renderPage(doc, page, 1200));
           } catch (e) {
             setDiag((p) => ({ ...p, [key]: { error: `第 ${page} 页渲染失败：${e.message}` } }));
             continue;
           }
           const url = cropToDataUrl(canvas, f.bbox, 1, pads[f.figureId] || 0);
           if (dead) return;
+          // 诊断：记录页面/裁剪尺寸，并检测裁剪结果是否近乎全白
+          const bb = f.bbox;
+          const cropW = Math.round((bb[2] - bb[0]) * canvas.width);
+          const cropH = Math.round((bb[3] - bb[1]) * canvas.height);
+          let blank = false;
+          try {
+            const probe = document.createElement('canvas');
+            probe.width = 40; probe.height = 40;
+            const pctx = probe.getContext('2d', { willReadFrequently: true });
+            const img = new Image();
+            await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('图片解码失败')); img.src = url; });
+            pctx.drawImage(img, 0, 0, 40, 40);
+            const data = pctx.getImageData(0, 0, 40, 40).data;
+            let nonWhite = 0;
+            for (let i = 0; i < data.length; i += 4) {
+              if (data[i] < 245 || data[i + 1] < 245 || data[i + 2] < 245) nonWhite++;
+            }
+            blank = nonWhite < 6;
+          } catch { /* 探测失败不阻断展示 */ }
           setThumbs((p) => ({ ...p, [key]: url }));
+          setDiag((p) => ({ ...p, [key]: { page, blank, cropW, cropH, pageW: canvas.width, pageH: canvas.height, pageCount: doc.numPages, bytes: url.length } }));
         }
         setStatus('');
       } catch (e) {
@@ -89,6 +109,12 @@ export default function FigureGallery({ pdfUrl, figures, onChange, onRecrop }) {
                   ? <img src={thumbs[key]} alt={f.title} loading="lazy" onClick={() => setZoom(thumbs[key])} style={{ cursor: 'zoom-in' }} />
                   : <div className="stage-empty">渲染中…</div>}
               <figcaption>
+                {diag[key]?.blank && (
+                  <p className="src-badge src-fallback" style={{ width: '100%' }}>
+                    ⚠ 该区域为空白（第 {diag[key].page}/{diag[key].pageCount} 页，裁剪 {diag[key].cropW}×{diag[key].cropH}px）
+                    —— 多半是 AI 页码或坐标不准，请点「整页预览」核对后重新框选
+                  </p>
+                )}
                 <div className="fig-kind-row">
                   <select value={f.kind} onChange={(e) => upd(f.figureId, { kind: e.target.value })} title="图类型标注">
                     {KIND_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -101,6 +127,14 @@ export default function FigureGallery({ pdfUrl, figures, onChange, onRecrop }) {
                   <button className="btn-ghost" onClick={() => bump(f.figureId, 0.02)} title="裁剪不全时扩大边界">＋留白</button>
                   <button className="btn-ghost" onClick={() => bump(f.figureId, -0.02)} disabled={pad <= 0}>－留白</button>
                   <button className="btn-ghost" onClick={() => onRecrop?.(f.figureId)}>重新框选</button>
+                  <button className="btn-ghost" onClick={async () => {
+                    // 整页预览：定位问题到底是"页码错"还是"坐标错"
+                    try {
+                      const doc = await loadPdf(pdfUrl);
+                      const { canvas } = await renderPage(doc, Math.min(Math.max(1, f.page), doc.numPages), 1400);
+                      setZoom(cropToDataUrl(canvas, [0, 0, 1, 1], 1));
+                    } catch (e) { setStatus(`整页预览失败：${e.message}`); }
+                  }}>整页预览</button>
                   {f.confirmed
                     ? <button className="btn-secondary" onClick={() => upd(f.figureId, { confirmed: false })}>✓ 已保留（点击撤销）</button>
                     : <button className="btn-primary" onClick={() => upd(f.figureId, { confirmed: true })}>确认保留</button>}

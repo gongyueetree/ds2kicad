@@ -468,3 +468,21 @@ test('v0.8.8：新增 package_outline 图类型，且图区外扩留白避免裁
   assert.ok(figs[0].bbox[2] >= 0.965, `右边界应外扩：${figs[0].bbox[2]}`);
   assert.ok(figs[0].bbox[0] >= 0 && figs[0].bbox[3] <= 1, 'bbox 必须仍在 [0,1]');
 });
+
+test('v0.8.8：倒序/退化 bbox 必须交换或扩为可用区域（原实现会裁出空白窄条）', async () => {
+  const { sanitizeFigures } = await import('../lib/validate.js');
+  const area = (b) => (b[2] - b[0]) * (b[3] - b[1]);
+  // y 轴倒序（AI 混淆左上/左下原点的典型形态）→ 交换，而不是外推成页底窄缝
+  const inv = sanitizeFigures([{ kind: 'block_diagram', page: 23, bbox: [0.1, 0.9, 0.9, 0.1] }])[0].bbox;
+  assert.deepEqual(inv, [0.1, 0.1, 0.9, 0.9]);
+  assert.ok(area(inv) > 0.5, `倒序修复后面积过小：${area(inv)}`);
+  // x 轴倒序
+  const invX = sanitizeFigures([{ kind: 'application', page: 1, bbox: [0.9, 0.1, 0.1, 0.6] }])[0].bbox;
+  assert.deepEqual(invX, [0.1, 0.1, 0.9, 0.6]);
+  // 完全退化（零面积）→ 给可用最小区域
+  const deg = sanitizeFigures([{ kind: 'application', page: 1, bbox: [0.5, 0.5, 0.5, 0.5] }])[0].bbox;
+  assert.ok(deg[2] - deg[0] >= 0.4 && deg[3] - deg[1] >= 0.3, JSON.stringify(deg));
+  assert.ok(deg.every((v) => v >= 0 && v <= 1));
+  // 正常 bbox 不被改动
+  assert.deepEqual(sanitizeFigures([{ kind: 'application', page: 1, bbox: [0.1, 0.1, 0.9, 0.6] }])[0].bbox, [0.1, 0.1, 0.9, 0.6]);
+});
