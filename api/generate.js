@@ -127,6 +127,11 @@ export default async function handler(req, res) {
     assetToken,
     reviewer: irToSave.lifecycle?.reviewedBy || null,
     canReview,
+    // v0.8.12：复核面板需要区分"无 publisher 角色"与"资产尚未批准" ——
+    // canPublish 把两者压成了同一个 false，面板无法给出正确提示
+    canPublishRole: hasRole(session, 'publisher'),
+    sessionAuthenticated: session.authenticated === true,
+    lifecycle: irToSave.lifecycle || null,
     // item 3/11：资产版本级发布许可（键为 symbol:<pinsetId> / footprint:<packageId> / …）
     canPublish: Object.fromEntries(enumerateAssetKeys(irToSave).map((key) => {
       const kind = key.split(':')[0];

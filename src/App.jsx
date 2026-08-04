@@ -8,6 +8,7 @@ import PackageForm from './components/PackageForm.jsx';
 import FigureEditor from './components/FigureEditor.jsx';
 import ViewerPanel from './components/ViewerPanel.jsx';
 import ExportPanel from './components/ExportPanel.jsx';
+import ReviewPanel from './components/ReviewPanel.jsx';
 import FigureGallery from './components/FigureGallery.jsx';
 
 const DEMO_URL = 'https://www.ti.com.cn/cn/lit/ds/symlink/tmuxl27518.pdf';
@@ -171,6 +172,22 @@ export default function App() {
     }));
     return ri.revision;
   }, [extract?.jobId, pkgs, figures]);
+
+  /**
+   * lifecycle（approve / publish）结果合入页面。
+   * 这些动作**必然使 revision +1**，不回写就会复现 v0.8.11 的 409 连锁。
+   */
+  const handleLifecycle = useCallback((r) => {
+    if (!r) return;
+    syncRevision(r.revision);
+    setGenResult((g) => (g ? {
+      ...g,
+      ...(Number.isInteger(r.revision) ? { revision: r.revision } : {}),
+      ...(r.state ? { state: r.state } : {}),
+      ...(r.lifecycle ? { lifecycle: r.lifecycle } : {}),
+      ...(r.manifest ? { manifest: r.manifest } : {})
+    } : g));
+  }, [syncRevision]);
 
   const doGenerate = async () => {
     const included = pkgs.filter((p) => p.include !== false);
@@ -492,7 +509,11 @@ export default function App() {
                 <ViewerPanel bundle={genResult} />
               </section>
               <section className="card">
-                <h2>⑥ 导出</h2>
+                <h2>⑥ 复核与发布</h2>
+                <ReviewPanel bundle={genResult} onLifecycle={handleLifecycle} />
+              </section>
+              <section className="card">
+                <h2>⑦ 导出</h2>
                 <ExportPanel bundle={genResult} confirmed={confirmed} pdfUrl={extract.pdfUrl} embedded={embedded} session={session} />
               </section>
             </>

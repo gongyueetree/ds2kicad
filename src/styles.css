@@ -150,3 +150,18 @@ footer a { color: var(--brand); }
 .fig-zoom { position: fixed; inset: 0; background: rgba(12,18,26,.86); z-index: 999; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; cursor: zoom-out; padding: 24px; }
 .fig-zoom img { max-width: 94vw; max-height: 86vh; background: #fff; border-radius: 8px; }
 .fig-zoom .hint { color: #cfe3d8; }
+
+/* ── v0.8.12 资产版本复核面板 ── */
+.review-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.review-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0; }
+.review-table th, .review-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.review-table th { font-weight: 600; color: var(--muted, #667); font-size: 12px; }
+.review-table tr.blocked { background: #fffaf3; }
+.review-table code { font-size: 12px; }
+.review-table input[type="checkbox"] { width: 16px; height: 16px; }
+.review-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.review-reason { flex: 1 1 280px; min-width: 220px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+.review-help { margin-top: 10px; font-size: 13px; }
+.review-help summary { cursor: pointer; color: var(--muted, #667); }
+.review-help ul { margin: 8px 0 0; padding-left: 20px; }
+.review-help li { margin-bottom: 6px; line-height: 1.6; }
