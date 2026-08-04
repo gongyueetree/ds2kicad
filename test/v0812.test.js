@@ -206,3 +206,39 @@ test('每个阻断原因枚举值在面板里都有中文说明与处理位置',
     assert.ok(v[0].length > 2 && v[1].length > 4, `${code} 说明过短`);
   }
 });
+
+/* ── 已认证但缺角色：面板必须能解释清楚 ── */
+
+const EDITOR = () => issueDevSession(
+  { sub: 'u1', name: 'R', tenantId: 'smoke-tenant', roles: ['editor'], iss: 'https://ezplm.cn', aud: 'ds2kicad' }, KEY);
+
+test('sessionAuthenticated 为 true 不等于有 reviewer 角色', async () => {
+  const { jobId } = await makePromotableJob();
+  const gen = await call('/api/generate', { jobId, patch: {} }, EDITOR());
+  assert.equal(gen.status, 200, JSON.stringify(gen.data).slice(0, 300));
+  assert.equal(gen.data.sessionAuthenticated, true, '验签通过');
+  assert.equal(gen.data.canReview, false, '但没有 reviewer 角色');
+  assert.equal(gen.data.canPublishRole, false);
+  // 此时闸门不再报 no_authenticated_ezplm_session（认证是过的），面板必须解释成"缺角色"
+  const reasons = new Set(Object.values(gen.data.assetKeyPromotion).flatMap((v) => v.reasons));
+  assert.ok(!reasons.has('no_authenticated_ezplm_session'), '认证已通过，不应再报未认证');
+});
+
+test('缺 reviewer 角色时 review 被 403 拒绝（面板据此给出 JWT 提示）', async () => {
+  const { jobId, gen } = await makePromotableJob();
+  const r = await call('/api/lifecycle', { jobId, action: 'review', reason: '页面复核', expectedRevision: gen.data.revision }, EDITOR());
+  assert.equal(r.status, 403);
+  assert.equal(r.data.code, 'insufficient_role');
+});
+
+test('缺 publisher 角色时 publish 被 403 拒绝', async () => {
+  const { jobId, gen } = await makePromotableJob();
+  const key = Object.entries(gen.data.assetKeyPromotion).find(([, v]) => v.promotable)?.[0];
+  const rev = await markReviewed(jobId, gen.data.revision);
+  const ap = await call('/api/lifecycle', { jobId, action: 'approve', assets: [key], reason: '复核通过', expectedRevision: rev }, sess());
+  assert.equal(ap.status, 200, JSON.stringify(ap.data));
+  // sess() 只有 reviewer，没有 publisher
+  const pb = await call('/api/lifecycle', { jobId, action: 'publish', assets: [key], reason: '发布', expectedRevision: ap.data.revision }, sess());
+  assert.equal(pb.status, 403);
+  assert.equal(pb.data.code, 'insufficient_role');
+});

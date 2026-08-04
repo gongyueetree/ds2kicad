@@ -46,7 +46,6 @@ export default function ReviewPanel({ bundle, onLifecycle }) {
     };
   }), [byKey, canPublish, approvals, published, bundle?.canPublishRole]);
 
-  if (!rows.length) return null;
 
   const toggle = (key) => setSel((s) => {
     const n = new Set(s);
@@ -79,6 +78,10 @@ export default function ReviewPanel({ bundle, onLifecycle }) {
       setBusy('');
       if (e.code === 'asset_not_promotable') {
         setErr(`${e.message}。闸门结论以服务端为准，请先清除下方列出的阻断原因。`);
+      } else if (e.code === 'insufficient_role') {
+        setErr(`${e.message}。请在 ezPLM 签发的 JWT 中补上对应角色（approve 需 reviewer，publish 需 publisher）。`);
+      } else if (e.code === 'tenant_mismatch' || e.code === 'not_job_owner') {
+        setErr(`${e.message}。JWT 的 tenantId 必须与作业所属租户一致。`);
       } else if (e.code === 'invalid_transition') {
         setErr(`${e.message}。approve 必须先经过「标记已复核」，publish 必须先 approve。`);
       } else if (e.code === 'revision_conflict') {
@@ -104,6 +107,29 @@ export default function ReviewPanel({ bundle, onLifecycle }) {
         {bundle.canPublishRole === false && <span className="src-badge src-fallback" style={{ marginLeft: 8 }}>无 publisher 角色</span>}
       </p>
 
+      <details className="review-help" open={!rows.length || bundle.canReview === false}>
+        <summary>会话与权限诊断</summary>
+        <ul>
+          <li>会话已认证：<b>{String(bundle.sessionAuthenticated ?? '未知（服务端未返回，多半是后端仍是旧版本）')}</b></li>
+          <li>reviewer 角色：<b>{String(bundle.canReview ?? '未知')}</b>
+            {bundle.canReview === false && <span className="hint">　—— JWT 缺少 <code>roles</code> 声明（也接受 <code>role</code> / <code>scope</code>），需包含 <code>reviewer</code>；否则 lifecycle 调用会被 403 拒绝</span>}
+          </li>
+          <li>publisher 角色：<b>{String(bundle.canPublishRole ?? '未知')}</b></li>
+          <li>作业状态：<b>{state}</b>　revision <b>{bundle.revision}</b></li>
+          <li>资产版本键：<b>{rows.length}</b> 个
+            {!rows.length && <span className="hint">　—— 服务端未返回 assetKeyPromotion。请确认后端已更新到 v0.8.12 并重新点击「生成」（面板读的是生成结果，不是提取结果）</span>}
+          </li>
+        </ul>
+      </details>
+
+      {!rows.length && (
+        <p className="error-line">
+          ✕ 没有拿到任何资产版本键，无法逐项复核。「标记已复核」不依赖资产列表，仍可先执行；
+          批准与发布需要资产列表，请先重新生成。
+        </p>
+      )}
+
+      {rows.length > 0 && (
       <table className="review-table">
         <thead>
           <tr><th /><th>资产版本</th><th>闸门</th><th>状态</th><th>阻断原因</th></tr>
@@ -134,6 +160,7 @@ export default function ReviewPanel({ bundle, onLifecycle }) {
           })}
         </tbody>
       </table>
+      )}
 
       <div className="review-actions">
         <input className="review-reason" value={reason} placeholder="复核理由（必填，会写入审计日志）"
@@ -152,6 +179,13 @@ export default function ReviewPanel({ bundle, onLifecycle }) {
           ③ 发布所选
         </button>
       </div>
+      {bundle.canReview === false && (
+        <p className="error-line">
+          ✕ 当前会话没有 <code>reviewer</code> 角色，「标记已复核」与「批准」均不可用。
+          请在 ezPLM 签发的 JWT 中加入 <code>"roles": ["reviewer"]</code>（发布还需 <code>publisher</code>）。
+          注意：<code>sessionAuthenticated</code> 为 true 只说明验签通过，与角色是两回事。
+        </p>
+      )}
       <p className="hint">
         当前状态 <b>{state}</b>{canApproveNow ? '' : '（需先「标记已复核」才能批准）'}　可批准 {selectable.length} 项 · 可发布 {publishable.length} 项。
         批准与发布都会使 revision +1；任何后续编辑会自动使受影响的批准失效。
