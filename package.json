@@ -1,7 +1,7 @@
 {
   "name": "ds2kicad",
   "private": true,
-  "version": "0.8.13",
+  "version": "0.8.14",
   "type": "module",
   "description": "Datasheet → KiCad symbol / footprint / 3D model extractor with in-browser preview (eetree / ezPLM)",
   "scripts": {
@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "test": "node --test test/*.test.js",
     "e2e": "playwright test",
-    "test:pg": "node --test test/pg.test.js"
+    "test:pg": "node --test test/pg.test.js",
+    "mint-session": "node scripts/mint-session.mjs"
   },
   "dependencies": {
     "@firecrawl/pdf-inspector": "^1.11.2",

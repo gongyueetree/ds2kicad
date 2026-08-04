@@ -24,6 +24,7 @@ export default function ReviewPanel({ bundle, onLifecycle }) {
   const state = bundle?.state || 'extracted';
   const canApproveNow = ['reviewed', 'approved', 'published'].includes(state);
 
+  const ad = bundle?.authDiagnostics || {};
   const byKey = bundle?.assetKeyPromotion || {};
   const canPublish = bundle?.canPublish || {};
   const approvals = bundle?.lifecycle?.approvals || {};
@@ -107,9 +108,34 @@ export default function ReviewPanel({ bundle, onLifecycle }) {
         {bundle.canPublishRole === false && <span className="src-badge src-fallback" style={{ marginLeft: 8 }}>无 publisher 角色</span>}
       </p>
 
+      {ad.devMode && (
+        <div className="warn-box" style={{ marginBottom: 10 }}>
+          <p><b>⚠ 当前是 AUTH_MODE=dev 的匿名身份，不是你配置的 JWT 会话。</b></p>
+          <p>
+            服务端收到的这次请求{ad.tokenPresent ? '带了令牌但验签未通过' : <b>没有携带任何令牌</b>}
+            {ad.secretConfigured ? '（EZPLM_JWT_SECRET 已配置）' : '（EZPLM_JWT_SECRET 未配置）'}，
+            于是被静默降级为匿名会话 <code>dev-anonymous</code>（roles: viewer/editor/reviewer，<b>authenticated: false</b>）。
+            这正是每个资产都挂着 <code>no_authenticated_ezplm_session</code>、且「无 publisher 角色」的原因 ——
+            匿名身份恰好带 reviewer，所以「标记已复核」能点，但任何资产都晋升不了。
+          </p>
+          <p>
+            前端 <code>src/api.js</code> 不会把令牌写进浏览器 bundle，它依赖<b>同源 Cookie <code>ezplm_session</code></b>
+            或网关注入的 <code>Authorization: Bearer</code>。只配 <code>EZPLM_JWT_SECRET</code> 不会让浏览器自动带上令牌。
+          </p>
+          <p>本地联调可用仓库里的 <code>node scripts/mint-session.mjs</code> 生成令牌与设置 Cookie 的命令；生产环境请设 <code>AUTH_MODE=production</code>，届时无令牌会直接 401，而不是静默降级。</p>
+          {ad.jobTenantId && ad.sessionTenantId && ad.jobTenantId !== ad.sessionTenantId && (
+            <p><b>注意：</b>本作业属于租户 <code>{ad.jobTenantId}</code>，当前会话租户是 <code>{ad.sessionTenantId}</code>。
+              换成真实 JWT 后访问旧作业会得到 403 <code>tenant_mismatch</code> —— <b>需要重新提取一次，生成属于新租户的作业</b>。</p>
+          )}
+        </div>
+      )}
+
       <details className="review-help" open={!rows.length || bundle.canReview === false}>
         <summary>会话与权限诊断</summary>
         <ul>
+          <li>AUTH_MODE：<b>{ad.authMode ?? '未知'}</b>　EZPLM_JWT_SECRET 已配置：<b>{String(ad.secretConfigured ?? '未知')}</b></li>
+          <li>本次请求携带令牌：<b>{String(ad.tokenPresent ?? '未知')}</b>　匿名降级：<b>{String(ad.devMode ?? '未知')}</b></li>
+          <li>会话角色：<code>{(ad.roles || []).join(', ') || '（无）'}</code>　租户：<code>{ad.sessionTenantId ?? '?'}</code>　作业租户：<code>{ad.jobTenantId ?? '?'}</code></li>
           <li>会话已认证：<b>{String(bundle.sessionAuthenticated ?? '未知（服务端未返回，多半是后端仍是旧版本）')}</b></li>
           <li>reviewer 角色：<b>{String(bundle.canReview ?? '未知')}</b>
             {bundle.canReview === false && <span className="hint">　—— JWT 缺少 <code>roles</code> 声明（也接受 <code>role</code> / <code>scope</code>），需包含 <code>reviewer</code>；否则 lifecycle 调用会被 403 拒绝</span>}

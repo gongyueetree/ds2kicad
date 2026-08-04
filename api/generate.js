@@ -131,6 +131,16 @@ export default async function handler(req, res) {
     // canPublish 把两者压成了同一个 false，面板无法给出正确提示
     canPublishRole: hasRole(session, 'publisher'),
     sessionAuthenticated: session.authenticated === true,
+    // v0.8.14：认证链路诊断（不含任何密钥内容），供复核面板解释"为什么未认证"
+    authDiagnostics: {
+      authMode: session.authMode || null,
+      secretConfigured: session.secretConfigured === true,
+      tokenPresent: session.tokenPresent === true,
+      devMode: session.devMode === true,
+      roles: session.roles || [],
+      sessionTenantId: session.tenantId || null,
+      jobTenantId: job.tenantId || null
+    },
     lifecycle: irToSave.lifecycle || null,
     // item 3/11：资产版本级发布许可（键为 symbol:<pinsetId> / footprint:<packageId> / …）
     canPublish: Object.fromEntries(enumerateAssetKeys(irToSave).map((key) => {

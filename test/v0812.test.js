@@ -242,3 +242,87 @@ test('缺 publisher 角色时 publish 被 403 拒绝', async () => {
   assert.equal(pb.status, 403);
   assert.equal(pb.data.code, 'insufficient_role');
 });
+
+/* ── v0.8.14：认证链路诊断 ── */
+
+test('无令牌 + AUTH_MODE=dev → 静默降级为匿名身份，诊断字段必须如实说明', async () => {
+  const prev = process.env.AUTH_MODE;
+  process.env.AUTH_MODE = 'dev';
+  try {
+    // 作业本身也由匿名身份创建（与现场一致：全程没有任何令牌）
+    const ex = await fetch(`http://localhost:${PORT}/api/extract`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdfUrl: 'https://www.ti.com/lit/ds/symlink/x.pdf' })
+    });
+    const jobId = (await ex.json()).jobId;
+    const r = await fetch(`http://localhost:${PORT}/api/generate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },   // 故意不带任何令牌
+      body: JSON.stringify({ jobId, patch: {} })
+    });
+    const d = await r.json();
+    assert.equal(r.status, 200, '现场正是这种"看起来正常但其实是匿名"的状态');
+    assert.equal(d.sessionAuthenticated, false);
+    assert.equal(d.canReview, true, '匿名身份恰好带 reviewer —— 这正是「标记已复核」能点的原因');
+    assert.equal(d.canPublishRole, false, '匿名身份没有 publisher');
+    const ad = d.authDiagnostics;
+    assert.equal(ad.devMode, true);
+    assert.equal(ad.tokenPresent, false, '必须如实报告"这次请求没带令牌"');
+    assert.equal(ad.secretConfigured, true, 'EZPLM_JWT_SECRET 配了也没用 —— 浏览器没送令牌');
+    assert.equal(ad.sessionTenantId, 'dev');
+    assert.equal(ad.jobTenantId, 'dev', '匿名身份创建的作业归属 dev 租户');
+    // 每个资产都因未认证被阻断
+    for (const v of Object.values(d.assetKeyPromotion)) {
+      assert.ok(v.reasons.includes('no_authenticated_ezplm_session'), JSON.stringify(v.reasons));
+    }
+  } finally { process.env.AUTH_MODE = prev; }
+});
+
+test('AUTH_MODE=production 下无令牌直接 401，不再静默降级', async () => {
+  const prev = process.env.AUTH_MODE;
+  process.env.AUTH_MODE = 'production';
+  try {
+    const r = await fetch(`http://localhost:${PORT}/api/extract`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdfUrl: 'https://www.ti.com/lit/ds/symlink/x.pdf' })
+    });
+    assert.equal(r.status, 401);
+  } finally { process.env.AUTH_MODE = prev; }
+});
+
+test('Cookie 通道：ezplm_session 与 Bearer 等效（前端依赖的正是 Cookie）', async () => {
+  const token = sess(['reviewer', 'publisher']);
+  const r = await fetch(`http://localhost:${PORT}/api/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: `ezplm_session=${token}` },
+    body: JSON.stringify({ pdfUrl: 'https://www.ti.com/lit/ds/symlink/x.pdf' })
+  });
+  const d = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(d).slice(0, 200));
+  const gen = await fetch(`http://localhost:${PORT}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: `ezplm_session=${token}` },
+    body: JSON.stringify({ jobId: d.jobId, patch: {} })
+  });
+  const gd = await gen.json();
+  assert.equal(gd.sessionAuthenticated, true, 'Cookie 通道必须产生已认证会话');
+  assert.equal(gd.authDiagnostics.tokenPresent, true);
+  assert.equal(gd.authDiagnostics.devMode, false);
+  assert.equal(gd.canPublishRole, true);
+});
+
+test('租户隔离：匿名身份创建的作业，换成真实 JWT 后访问被 403 拒绝', async () => {
+  const prevMode = process.env.AUTH_MODE;
+  process.env.AUTH_MODE = 'dev';
+  let jobId;
+  try {
+    const r = await fetch(`http://localhost:${PORT}/api/extract`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdfUrl: 'https://www.ti.com/lit/ds/symlink/x.pdf' })
+    });
+    jobId = (await r.json()).jobId;
+  } finally { process.env.AUTH_MODE = prevMode; }
+  // 真实 JWT 的 tenantId 是 smoke-tenant，作业却属于 dev
+  const gen = await call('/api/generate', { jobId, patch: {} }, PUB());
+  assert.equal(gen.status, 403);
+  assert.equal(gen.data.code, 'tenant_mismatch', '换令牌后必须重新提取，旧作业访问不了');
+});
