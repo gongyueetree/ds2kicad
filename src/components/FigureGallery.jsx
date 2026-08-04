@@ -109,9 +109,10 @@ export default function FigureGallery({ pdfUrl, figures, onChange, onRecrop }) {
 
   if (!figures?.length) return null;
 
-  const upd = (figureId, patch) => onChange?.(figures.map((f) => (f.figureId === figureId ? { ...f, ...patch } : f)));
-  const remove = (figureId) => onChange?.(figures.filter((f) => f.figureId !== figureId));
-  const bump = (figureId, delta) => setPads((p) => ({ ...p, [figureId]: Math.max(0, Math.min(0.12, +(((p[figureId] || 0) + delta).toFixed(3)))) }));
+  // figureId 是主键：缺 ID 时 `f.figureId === undefined` 会一次命中所有无 ID 的图，必须显式挡掉
+  const upd = (figureId, patch) => figureId && onChange?.(figures.map((f) => (f.figureId === figureId ? { ...f, ...patch } : f)));
+  const remove = (figureId) => figureId && onChange?.(figures.filter((f) => f.figureId !== figureId));
+  const bump = (figureId, delta) => figureId && setPads((p) => ({ ...p, [figureId]: Math.max(0, Math.min(0.12, +(((p[figureId] || 0) + delta).toFixed(3)))) }));
   const refit = (figureId) => { refitRef.current.add(figureId); upd(figureId, { fitMethod: null }); };
 
   const confirmedCount = figures.filter((f) => f.confirmed).length;

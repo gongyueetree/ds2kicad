@@ -1,7 +1,8 @@
 // src/App.jsx — 主流程：贴 URL → 提取 → 确认（多封装/多 pinset）→ 批量生成 → 预览 → 导出
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiExtract, apiGenerate, apiLoadJob } from './api.js';
 import { setLocalPdf, setPdfToken, setJobId } from './pdf.js';
+import { withFigureIds } from './figstate.js';
 import PinTable from './components/PinTable.jsx';
 import PackageForm from './components/PackageForm.jsx';
 import FigureEditor from './components/FigureEditor.jsx';
@@ -19,7 +20,11 @@ export default function App() {
   const [file, setFile] = useState(null); // 上传模式的本地 PDF File
   const [session, setSession] = useState(null); // ezPLM 会话：{origin, nonce, jobId}
   const [reviewReason, setReviewReason] = useState('');   // item 6：统一审核理由（所有人工修改共用）
-  const [recropFigureId, setRecropFigureId] = useState(null);  // 图集「重新框选」跳转目标
+  // v0.8.10：一次性跳转请求 {figureId, seq}；常驻值会导致重复点击不生效、且被任意 figures 变更反复触发
+  const [recropReq, setRecropReq] = useState(null);
+  const recropSeqRef = useRef(0);
+  // 稳定引用：作为 FigureEditor effect 的依赖，避免每次渲染都重建导致 effect 反复触发
+  const handleRecropHandled = useCallback(() => setRecropReq(null), []);
   // item 2：审核身份只能来自 ezPLM 已认证会话（服务端从 JWT 取出），前端不再自填
   const [phase, setPhase] = useState('idle');
   const [error, setError] = useState('');
@@ -107,7 +112,9 @@ export default function App() {
       setPart(data.part);
       setPinsets(sets);
       setPkgs(packages);
-      setFigures(data.figures);
+      // 任何入口都必须保证 figureId 存在：缺 ID 的图既无法被「重新框选」定位，
+      // 也会被审核补丁的 `if (!f.figureId) continue` 静默丢弃
+      setFigures(withFigureIds(data.figures));
       setPkgIndex(Math.min(data.recommendedPackageIndex || 0, packages.length - 1));
       setPhase('confirm');
       setConfirmTab('pins');
@@ -403,7 +410,7 @@ export default function App() {
               />
             )}
             {confirmTab === 'figs' && (
-              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} jobId={extract.jobId} revision={extract.revision} focusFigureId={recropFigureId} />
+              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} jobId={extract.jobId} revision={extract.revision} focusRequest={recropReq} onFocusHandled={handleRecropHandled} />
             )}
           </section>
 
@@ -415,9 +422,10 @@ export default function App() {
                 figures={figures}
                 onChange={setFigures}
                 onRecrop={(figureId) => {
+                  if (!figureId) return;
                   setConfirmTab('figs');
-                  setRecropFigureId(figureId);
-                  document.querySelector('.figure-editor')?.scrollIntoView({ behavior: 'smooth' });
+                  // seq 保证"对同一张图连续点击"也能触发；滚动交给 FigureEditor 自己在挂载后执行
+                  setRecropReq({ figureId, seq: ++recropSeqRef.current });
                 }}
               />
             </section>

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { loadPdf, renderPage, analyzePage, cropToDataUrl } from '../pdf.js';
 import { autoFitFigure, METHOD_LABEL } from '../figfit.js';
+import { newFigureTempId, resolveActiveIndex, shouldConsumeFocus, nextActiveAfterRemoval } from '../figstate.js';
 import { apiFigureUpload } from '../api.js';
 
 const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用参考电路', pin_configuration: '管脚排布图', package_outline: '封装图' };
@@ -71,20 +72,45 @@ function CropStage({ pageCanvas, bbox, onBbox }) {
   );
 }
 
-export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock, jobId, revision, focusFigureId }) {
+export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock, jobId, revision, focusRequest, onFocusHandled }) {
   const [doc, setDoc] = useState(null);
   const [pageCount, setPageCount] = useState(0);
-  const [active, setActive] = useState(0);
+  // v0.8.10：当前图用 figureId 追踪，不再用数组下标 ——
+  // 下标会在图集「丢弃」/ 服务端回写导致数组重排后指向另一张图。
+  const [activeId, setActiveId] = useState(null);
   const [pageCanvas, setPageCanvas] = useState(null);
-  const [previews, setPreviews] = useState({});   // index → dataURL
+  const [previews, setPreviews] = useState({});   // figureId → dataURL
   const [status, setStatus] = useState('');
-  // 图集「重新框选」跳转：自动切到该图
+  const rootRef = useRef(null);
+  const handledSeqRef = useRef(null);
+
+  const activeIndex = Math.max(0, resolveActiveIndex(figures, activeId));
+  const fig = figures[activeIndex];
+  const setActiveById = (id) => setActiveId(id);
+
+  // 首次挂载 / 当前图被删除后，回落到第一张
   useEffect(() => {
-    if (!focusFigureId) return;
-    const i = figures.findIndex((f) => f.figureId === focusFigureId);
-    if (i >= 0) setActive(i);
-  }, [focusFigureId, figures]);
-  const aiBboxRef = useRef((aiFigures || figures).map((f) => ({ page: f.page, bbox: [...f.bbox] })));
+    if (!figures.length) return;
+    if (!figures.some((f) => f.figureId === activeId)) setActiveId(figures[0].figureId);
+  }, [figures, activeId]);
+
+  // 图集「重新框选」跳转。
+  // v0.8.10：focusRequest 是**一次性请求令牌** {figureId, seq}，不是常驻值。
+  //   旧实现用常驻的 focusFigureId + 依赖 figures，导致两个缺陷：
+  //   (a) 对同一张图再次点「重新框选」时 props 不变 → effect 不触发 → 停在上次的图（表现为"跳到某个固定页面"）；
+  //   (b) 任何 figures 变更（自动贴合写回、确认、改标题）都会把用户强行拽回上次的跳转目标。
+  useEffect(() => {
+    if (!shouldConsumeFocus(focusRequest, handledSeqRef.current, figures)) return;
+    handledSeqRef.current = focusRequest.seq;
+    setActiveId(focusRequest.figureId);
+    // 等编辑器完成挂载/渲染后再滚动 —— 由本组件自己滚，调用方在挂载前 querySelector 必然落空
+    requestAnimationFrame(() => rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    onFocusHandled?.();
+  }, [focusRequest, figures, onFocusHandled]);
+
+  const aiBboxRef = useRef(new Map(
+    (aiFigures || figures).map((f) => [f.figureId, { page: f.page, bbox: [...f.bbox] }])
+  ));
 
   // 加载 PDF
   useEffect(() => {
@@ -97,8 +123,6 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
     return () => { dead = true; };
   }, [pdfUrl]);
 
-  const fig = figures[active];
-
   // 渲染当前图对应页
   useEffect(() => {
     if (!doc || !fig) return;
@@ -109,36 +133,32 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
       .then(({ canvas }) => { if (!dead) { setPageCanvas(canvas); setStatus(''); } })
       .catch((e) => !dead && setStatus(`页面渲染失败：${e.message}`));
     return () => { dead = true; };
-  }, [doc, fig?.page, active]);
+  }, [doc, fig?.page, activeId]);
 
   // 生成当前裁剪预览
   useEffect(() => {
     if (!pageCanvas || !fig) return;
     try {
       const url = cropToDataUrl(pageCanvas, fig.bbox, 1);
-      setPreviews((prev) => ({ ...prev, [active]: url }));
+      setPreviews((prev) => ({ ...prev, [fig.figureId]: url }));
     } catch { /* 忽略瞬时错误 */ }
-  }, [pageCanvas, fig?.bbox, active]);
+  }, [pageCanvas, fig?.bbox, activeId]);
 
   if (!figures.length) {
     return (
       <div className="figure-editor">
         <p className="hint">未提取到图区。可手动添加：</p>
-        <button className="btn-secondary" onClick={() => onChange([{ kind: 'block_diagram', title: 'Functional Block Diagram', page: 1, bbox: [0.1, 0.1, 0.9, 0.6] }])}>＋ 添加图区</button>
+        <button className="btn-secondary" onClick={() => onChange([{ figureId: newFigureTempId(), kind: 'block_diagram', title: 'Functional Block Diagram', page: 1, bbox: [0.1, 0.1, 0.9, 0.6] }])}>＋ 添加图区</button>
       </div>
     );
   }
 
-  const updFig = (patch) => {
-    const next = figures.slice();
-    next[active] = { ...next[active], ...patch };
-    onChange(next);
-  };
+  const updFig = (patch) => onChange(figures.map((f) => (f.figureId === fig.figureId ? { ...f, ...patch } : f)));
 
   const confirmedCount = figures.filter((f) => f.confirmed).length;
 
   return (
-    <div className="figure-editor">
+    <div className="figure-editor" ref={rootRef}>
       <p className="hint">
         已确认 <b>{confirmedCount}</b> / {figures.length} 张 — 只有「已确认」的图会进入 ZIP / part-bundle / ezPLM 发送。
         {confirmedCount < figures.length && (
@@ -148,12 +168,19 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
       </p>
       <div className="figure-tabs">
         {figures.map((f, i) => (
-          <button key={i} className={`fig-tab ${i === active ? 'active' : ''} ${f.confirmed ? 'confirmed' : ''}`} onClick={() => setActive(i)}>
+          <button key={f.figureId || i} className={`fig-tab ${i === activeIndex ? 'active' : ''} ${f.confirmed ? 'confirmed' : ''}`} onClick={() => setActiveById(f.figureId)}>
             {f.confirmed ? '✓ ' : ''}{KIND_LABEL[f.kind]} {figures.filter((x) => x.kind === f.kind).length > 1 ? `#${figures.slice(0, i + 1).filter((x) => x.kind === f.kind).length}` : ''}
           </button>
         ))}
-        <button className="btn-ghost" onClick={() => { onChange([...figures, { kind: 'application', title: 'Application Example', page: fig.page, bbox: [0.1, 0.1, 0.9, 0.5] }]); setActive(figures.length); }}>＋</button>
-        {figures.length > 1 && <button className="btn-ghost" onClick={() => { const next = figures.filter((_, i) => i !== active); onChange(next); setActive(Math.max(0, active - 1)); }}>删除当前</button>}
+        <button className="btn-ghost" onClick={() => {
+          const added = { figureId: newFigureTempId(), kind: 'application', title: 'Application Example', page: fig.page, bbox: [0.1, 0.1, 0.9, 0.5] };
+          onChange([...figures, added]); setActiveById(added.figureId);
+        }}>＋</button>
+        {figures.length > 1 && <button className="btn-ghost" onClick={() => {
+          const next = figures.filter((f) => f.figureId !== fig.figureId);
+          onChange(next);
+          setActiveById(nextActiveAfterRemoval(next, activeIndex));
+        }}>删除当前</button>}
       </div>
 
       <div className="figure-meta">
@@ -176,7 +203,7 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
           </span>
         </label>
         <button className="btn-ghost" onClick={() => {
-          const ai = aiBboxRef.current[active];
+          const ai = aiBboxRef.current.get(fig.figureId);
           if (ai) updFig({ page: ai.page, bbox: [...ai.bbox], fitMethod: 'ai' });
         }}>重置为 AI 建议框</button>
         <button className="btn-ghost" title="按图注文字与页面墨迹重新计算裁剪框（确定性引擎）" onClick={async () => {
@@ -209,8 +236,8 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
         </div>
         <div className="figure-preview">
           <p className="hint">截取结果预览：</p>
-          {previews[active]
-            ? <img src={previews[active]} alt={fig.title} />
+          {previews[fig.figureId]
+            ? <img src={previews[fig.figureId]} alt={fig.title} />
             : <div className="stage-empty">—</div>}
           <div style={{ marginTop: 10 }}>
             {fig.confirmed
@@ -219,7 +246,7 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
                   // v0.8.7 item 7：确认即把裁剪 PNG 真实上传到服务端（对象存储），再标记 confirmed
                   updFig({ confirmed: true });
                   try {
-                    const dataUrl = previews[active];
+                    const dataUrl = previews[fig.figureId];
                     if (dataUrl && jobId && fig.figureId) {
                       await apiFigureUpload({
                         jobId, figureId: fig.figureId,
