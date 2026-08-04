@@ -11,11 +11,22 @@ async function post(path, body) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     if (r.status === 504) {
-      throw new Error('服务端处理超时（大 PDF + AI 响应慢）。建议：① 直接重试（AI 偶发慢）② ti.com.cn 链接改用 www.ti.com 全球域名 ③ 确认 Vercel 函数时长上限 ≥60s');
+      throw apiError('服务端处理超时（大 PDF + AI 响应慢）。建议：① 直接重试（AI 偶发慢）② ti.com.cn 链接改用 www.ti.com 全球域名 ③ 确认 Vercel 函数时长上限 ≥60s', r.status, data);
     }
-    throw new Error(data.error || `${path} 返回 ${r.status}`);
+    // v0.8.11：错误码与 currentRevision 必须传到调用方 —— 否则乐观锁冲突无法自愈
+    throw apiError(data.error || `${path} 返回 ${r.status}`, r.status, data);
   }
   return data;
+}
+
+/** 把服务端的结构化错误信息（code / currentRevision / …）挂到 Error 上 */
+function apiError(message, status, data) {
+  const e = new Error(message);
+  e.status = status;
+  e.code = data?.code || null;
+  if (data?.currentRevision !== undefined) e.currentRevision = data.currentRevision;
+  e.payload = data || null;
+  return e;
 }
 
 export const apiExtract = (payload) => post('/api/extract', typeof payload === 'string' ? { pdfUrl: payload } : payload);
@@ -25,7 +36,7 @@ export const apiGenerate = (payload) => post('/api/generate', payload);
 export async function apiLoadJob(jobId) {
   const r = await fetch(`/api/job?jobId=${encodeURIComponent(jobId)}`, { credentials: 'same-origin' });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || `加载作业失败（${r.status}）`);
+  if (!r.ok) throw apiError(data.error || `加载作业失败（${r.status}）`, r.status, data);
   return data;
 }
 export const apiFigureUpload = (payload) => post('/api/figure-upload', payload);

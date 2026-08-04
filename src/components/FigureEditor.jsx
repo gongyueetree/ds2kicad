@@ -72,7 +72,7 @@ function CropStage({ pageCanvas, bbox, onBbox }) {
   );
 }
 
-export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock, jobId, revision, focusRequest, onFocusHandled }) {
+export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock, jobId, revision, focusRequest, onFocusHandled, onRevision }) {
   const [doc, setDoc] = useState(null);
   const [pageCount, setPageCount] = useState(0);
   // v0.8.10：当前图用 figureId 追踪，不再用数组下标 ——
@@ -248,16 +248,25 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
                   try {
                     const dataUrl = previews[fig.figureId];
                     if (dataUrl && jobId && fig.figureId) {
-                      await apiFigureUpload({
+                      const r = await apiFigureUpload({
                         jobId, figureId: fig.figureId,
                         pngBase64: dataUrl.split(',')[1],
                         expectedRevision: revision,
                         page: fig.page, bbox: fig.bbox
                       });
-                      setStatus('图片已上传到服务端 ✓');
+                      // v0.8.11：上传会递增作业 revision。此前丢弃了返回值，导致
+                      // 上传过一次后 extract.revision 永久落后，后续生成一律 409 版本冲突。
+                      onRevision?.(r.revision);
+                      setStatus(`图片已上传到服务端 ✓（revision → ${r.revision}）`);
                     }
                   } catch (e) {
-                    setStatus(`图片上传失败：${e.message}`);
+                    if (e.code === 'revision_conflict' && Number.isInteger(e.currentRevision)) {
+                      onRevision?.(e.currentRevision);
+                      setStatus(`版本已过期，已同步到 revision ${e.currentRevision}，请再次点击「确认此图」`);
+                    } else {
+                      setStatus(`图片上传失败：${e.message}`);
+                    }
+                    updFig({ confirmed: false });   // 上传失败不得留下"已确认"的假象
                   }
                 }}>确认此图（截取并上传）</button>}
           </div>

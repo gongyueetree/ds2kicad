@@ -139,6 +139,39 @@ export default function App() {
   };
   const sharedWith = pkg ? pkgs.filter((p) => p.pinsetId === pkg.pinsetId).map((p) => p.name) : [];
 
+  /**
+   * v0.8.11：乐观锁自愈。
+   * /api/figure-upload 每次提交都会 **递增 revision**，而页面此前丢弃了它返回的新版本号，
+   * 于是「确认此图」上传过一次后，extract.revision 就永久落后，之后所有写操作都 409。
+   * 这里做两件事：① 上传成功后立刻回写版本号（根治）；② 万一仍冲突，从服务端拉回权威 IR 重新对齐。
+   */
+  const syncRevision = useCallback((rev) => {
+    if (!Number.isInteger(rev)) return;
+    setExtract((e) => (e && e.revision !== rev ? { ...e, revision: rev } : e));
+  }, []);
+
+  const resyncJob = useCallback(async () => {
+    if (!extract?.jobId) return null;
+    const ri = await apiLoadJob(extract.jobId);
+    setPart(ri.part);
+    setPinsets(ri.pinsets || []);
+    setPkgs((ri.packages || []).map((p) => {
+      const prev = pkgs.find((x) => x.packageId === p.packageId);
+      return { ...p, include: prev ? prev.include : true, fieldEdits: {} };
+    }));
+    setFigures((withFigureIds(ri.figures)).map((f) => {
+      const prev = figures.find((x) => x.figureId === f.figureId);
+      return prev ? { ...f, fitMethod: prev.fitMethod, fitCaption: prev.fitCaption, aiBbox: prev.aiBbox } : f;
+    }));
+    setExtract((e) => ({
+      ...e,
+      revision: ri.revision,
+      state: ri.state,
+      __original: structuredClone({ part: ri.part, packages: ri.packages, pinsets: ri.pinsets, figures: ri.figures })
+    }));
+    return ri.revision;
+  }, [extract?.jobId, pkgs, figures]);
+
   const doGenerate = async () => {
     const included = pkgs.filter((p) => p.include !== false);
     if (!included.length) { setError('至少勾选一个封装'); return; }
@@ -280,7 +313,18 @@ export default function App() {
       setPhase('confirm');
       setTimeout(() => document.getElementById('preview-anchor')?.scrollIntoView({ behavior: 'smooth' }), 100);
     } catch (e) {
-      setError(e.message);
+      if (e.code === 'revision_conflict') {
+        // 不盲目重试（可能是他人改动），拉回权威 IR 对齐后请用户确认再提交
+        try {
+          const rev = await resyncJob();
+          setError(`版本冲突：作业已更新到 revision ${rev ?? e.currentRevision}。页面已同步到最新内容，请核对后再次点击生成。`);
+        } catch (e2) {
+          syncRevision(e.currentRevision);
+          setError(`${e.message}。自动同步失败（${e2.message}），请刷新页面或重新提取。`);
+        }
+      } else {
+        setError(e.message);
+      }
       setPhase('confirm');
     }
   };
@@ -410,7 +454,7 @@ export default function App() {
               />
             )}
             {confirmTab === 'figs' && (
-              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} jobId={extract.jobId} revision={extract.revision} focusRequest={recropReq} onFocusHandled={handleRecropHandled} />
+              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} jobId={extract.jobId} revision={extract.revision} focusRequest={recropReq} onFocusHandled={handleRecropHandled} onRevision={syncRevision} />
             )}
           </section>
 
@@ -435,6 +479,9 @@ export default function App() {
             <button className="btn-primary btn-big" disabled={phase === 'generating'} onClick={doGenerate}>
               {phase === 'generating' ? '生成中…' : `✓ 确认无误，生成 ${includeCount} 个封装的 KiCad 符号 / 封装 / 3D`}
             </button>
+            {/* v0.8.11：错误此前只渲染在页面顶部的 URL 卡片里，生成失败时用户看不到，
+                表现为"点按钮没反应"。这里就地再显示一份。 */}
+            {error && <p className="error-line" style={{ marginTop: 10 }}>✕ {error}</p>}
           </section>
 
           <div id="preview-anchor" />
