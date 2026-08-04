@@ -254,7 +254,14 @@ export default function App() {
           const prev = pkgs.find((x) => x.packageId === p.packageId);
           return { ...p, include: prev ? prev.include : true, fieldEdits: {} };
         }));
-        setFigures(ri.figures || []);
+        // v0.8.9：reviewedIr 不承载客户端几何溯源字段，按 figureId 保留
+        // fitMethod/fitCaption/aiBbox，否则手动框选会在回写后被自动贴合覆盖
+        setFigures((ri.figures || []).map((f) => {
+          const prev = figures.find((x) => x.figureId === f.figureId);
+          return prev
+            ? { ...f, fitMethod: prev.fitMethod, fitCaption: prev.fitCaption, aiBbox: prev.aiBbox }
+            : f;
+        }));
         setExtract((e) => ({
           ...e,
           revision: result.revision,           // 回写新版本号，供下次 expectedRevision 使用

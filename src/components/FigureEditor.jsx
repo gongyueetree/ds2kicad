@@ -1,7 +1,8 @@
 // src/components/FigureEditor.jsx — 图区确认与截取编辑器
 // AI 给出候选页码 + 包围盒 → pdf.js 渲染页面 → 用户拖拽微调裁剪框 → 生成 PNG
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { loadPdf, renderPage, cropToDataUrl } from '../pdf.js';
+import { loadPdf, renderPage, analyzePage, cropToDataUrl } from '../pdf.js';
+import { autoFitFigure, METHOD_LABEL } from '../figfit.js';
 import { apiFigureUpload } from '../api.js';
 
 const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用参考电路', pin_configuration: '管脚排布图', package_outline: '封装图' };
@@ -176,16 +177,34 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
         </label>
         <button className="btn-ghost" onClick={() => {
           const ai = aiBboxRef.current[active];
-          if (ai) updFig({ page: ai.page, bbox: [...ai.bbox] });
+          if (ai) updFig({ page: ai.page, bbox: [...ai.bbox], fitMethod: 'ai' });
         }}>重置为 AI 建议框</button>
+        <button className="btn-ghost" title="按图注文字与页面墨迹重新计算裁剪框（确定性引擎）" onClick={async () => {
+          try {
+            setStatus('正在按图注与墨迹贴合…');
+            const d = doc || (await loadPdf(pdfUrl));
+            const an = await analyzePage(d, Math.min(Math.max(1, fig.page), d.numPages), 1200);
+            const seed = fig.aiBbox || fig.bbox;
+            const fit = autoFitFigure(an, { ...fig, bbox: seed });
+            if (fit) { updFig({ bbox: fit.bbox, fitMethod: fit.method, fitCaption: fit.caption || null, aiBbox: fig.aiBbox || fig.bbox, confirmed: false }); setStatus(`已自动贴合（${METHOD_LABEL[fit.method] || fit.method}）`); }
+            else setStatus('未能自动贴合：该页未找到可用图块，请手动框选');
+          } catch (e) { setStatus(`自动贴合失败：${e.message}`); }
+        }}>自动贴合</button>
       </div>
 
+      {fig.fitMethod && (
+        <p className="hint">
+          当前裁剪框来源：<b>{METHOD_LABEL[fig.fitMethod] || fig.fitMethod}</b>
+          {fig.fitCaption ? `（锚定图注：${fig.fitCaption}）` : ''}
+          {fig.fitMethod === 'ai' ? ' —— AI 给出的坐标不可靠，建议点「自动贴合」或手动框选' : ''}
+        </p>
+      )}
       {status && <p className="status-line">{status}</p>}
       <div className="figure-work">
         <div className="figure-stage">
           <p className="hint">在页面上按住左键拖拽，重新框选图区{mock ? '（演示模式：AI 建议框为占位值，请自行框选）' : ''}：</p>
           {pageCanvas
-            ? <CropStage pageCanvas={pageCanvas} bbox={fig.bbox} onBbox={(bbox) => updFig({ bbox, confirmed: false })} />
+            ? <CropStage pageCanvas={pageCanvas} bbox={fig.bbox} onBbox={(bbox) => updFig({ bbox, confirmed: false, fitMethod: 'manual' })} />
             : <div className="stage-empty">等待页面渲染…</div>}
         </div>
         <div className="figure-preview">
