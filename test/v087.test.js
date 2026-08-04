@@ -425,3 +425,46 @@ test('反例12：Figure 上传使该 Figure 的旧批准失效', async () => {
   assert.ok(!db.lifecycle.approvals[`figure:${figId}`], '重新上传必须使该 Figure 批准失效');
   assert.ok(db.lifecycle.approvals[`footprint:${pkgId}`], '不得波及其他资产的批准');
 });
+
+test('v0.8.8：新增 package_outline 图类型，且图区外扩留白避免裁切', async () => {
+  const { filterFigures } = await import('../lib/figfilter.js');
+  const { sanitizeFigures } = await import('../lib/validate.js');
+  const { applyReviewPatch } = await import('../lib/reviewpatch.js');
+  // 四类共存且各自入选
+  const out = filterFigures([
+    { kind: 'block_diagram', title: '图 7-2. 功能方框图', page: 23, bbox: [0.1, 0.1, 0.9, 0.5] },
+    { kind: 'pin_configuration', title: '图4-1. RTW 封装 24 引脚 WQFN 顶视图', page: 3, bbox: [0.1, 0.1, 0.9, 0.5] },
+    { kind: 'package_outline', title: 'PACKAGE OUTLINE / 封装外形图', page: 40, bbox: [0.1, 0.1, 0.9, 0.5] },
+    { kind: 'application', title: '典型应用', page: 1, bbox: [0.1, 0.1, 0.9, 0.5] },
+    { kind: 'application', title: '图 9-2. 典型应用电路', page: 18, bbox: [0.1, 0.1, 0.9, 0.5] }
+  ], { pkgCount: 2 });
+  const kinds = out.map((f) => f.kind);
+  for (const k of ['block_diagram', 'pin_configuration', 'package_outline', 'application']) {
+    assert.ok(kinds.includes(k), `${k} 必须入选：${JSON.stringify(kinds)}`);
+  }
+  assert.equal(out.filter((f) => f.kind === 'application').length, 2, '应用图允许多张');
+  // sanitize 保留新类型
+  assert.equal(sanitizeFigures([{ kind: 'package_outline', page: 40, bbox: [0.1, 0.1, 0.9, 0.5] }])[0].kind, 'package_outline');
+  // Patch 接受新类型
+  const ir = { part: { mpn: 'A' }, packages: [], pinsets: [], figures: [{ figureId: 'f1', kind: 'application', page: 1, bbox: [0, 0, 1, 1], confirmed: false }] };
+  const r = applyReviewPatch(ir, { figures: [{ figureId: 'f1', kind: { value: 'package_outline', reason: '实为封装图' } }] }, { reviewer: { sub: 'u', name: 'R' } });
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.ir.figures[0].kind, 'package_outline');
+  // 非法类型仍拒绝
+  assert.equal(applyReviewPatch(ir, { figures: [{ figureId: 'f1', kind: { value: 'nonsense', reason: 'x' } }] }, { reviewer: { sub: 'u', name: 'R' } }).ok, false);
+
+  // 程序化定位的 bbox 必须带外扩留白
+  const { PDFDocument, StandardFonts } = await import('pdf-lib');
+  const { extractTextPages } = await import('../lib/pdftext.js');
+  const { findFigures } = await import('../lib/heuristics.js');
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const pg = doc.addPage([612, 792]);
+  pg.drawText('Figure 12. Functional Block Diagram', { x: 200, y: 420, size: 9, font });
+  const { pages } = await extractTextPages(Buffer.from(await doc.save()));
+  const figs = findFigures(pages);
+  assert.ok(figs.length > 0);
+  assert.ok(figs[0].bbox[0] <= 0.035, `左边界应外扩：${figs[0].bbox[0]}`);
+  assert.ok(figs[0].bbox[2] >= 0.965, `右边界应外扩：${figs[0].bbox[2]}`);
+  assert.ok(figs[0].bbox[0] >= 0 && figs[0].bbox[3] <= 1, 'bbox 必须仍在 [0,1]');
+});

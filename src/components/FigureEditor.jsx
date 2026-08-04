@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { loadPdf, renderPage, cropToDataUrl } from '../pdf.js';
 import { apiFigureUpload } from '../api.js';
 
-const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用示例', pin_configuration: '管脚排布图' };
+const KIND_LABEL = { block_diagram: '内部功能框图', application: '应用参考电路', pin_configuration: '管脚排布图', package_outline: '封装图' };
 
 function CropStage({ pageCanvas, bbox, onBbox }) {
   const wrapRef = useRef(null);
@@ -70,13 +70,19 @@ function CropStage({ pageCanvas, bbox, onBbox }) {
   );
 }
 
-export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock, jobId, revision }) {
+export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, mock, jobId, revision, focusFigureId }) {
   const [doc, setDoc] = useState(null);
   const [pageCount, setPageCount] = useState(0);
   const [active, setActive] = useState(0);
   const [pageCanvas, setPageCanvas] = useState(null);
   const [previews, setPreviews] = useState({});   // index → dataURL
   const [status, setStatus] = useState('');
+  // 图集「重新框选」跳转：自动切到该图
+  useEffect(() => {
+    if (!focusFigureId) return;
+    const i = figures.findIndex((f) => f.figureId === focusFigureId);
+    if (i >= 0) setActive(i);
+  }, [focusFigureId, figures]);
   const aiBboxRef = useRef((aiFigures || figures).map((f) => ({ page: f.page, bbox: [...f.bbox] })));
 
   // 加载 PDF
@@ -155,7 +161,8 @@ export default function FigureEditor({ pdfUrl, figures, aiFigures, onChange, moc
           <select value={fig.kind} onChange={(e) => updFig({ kind: e.target.value })}>
             <option value="block_diagram">内部功能框图</option>
             <option value="pin_configuration">管脚排布图</option>
-            <option value="application">应用示例</option>
+            <option value="package_outline">封装图</option>
+            <option value="application">应用参考电路</option>
           </select>
         </label>
         <label>页码

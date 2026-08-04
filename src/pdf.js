@@ -56,7 +56,18 @@ export async function renderPage(doc, pageNum, targetWidth = 1100) {
 }
 
 /** 按归一化 bbox（左上原点）从整页 canvas 截取为 PNG dataURL */
-export function cropToDataUrl(pageCanvas, bbox, outScale = 1) {
+/** v0.8.8：pad 为归一化留白比例，避免图形边缘的管脚标注/引出线被裁掉 */
+export function cropToDataUrl(pageCanvas, bbox, outScale = 1, pad = 0) {
+  if (pad > 0) {
+    bbox = [
+      Math.max(0, bbox[0] - pad), Math.max(0, bbox[1] - pad),
+      Math.min(1, bbox[2] + pad), Math.min(1, bbox[3] + pad)
+    ];
+  }
+  return cropInner(pageCanvas, bbox, outScale);
+}
+
+function cropInner(pageCanvas, bbox, outScale = 1) {
   const [x0, y0, x1, y1] = bbox;
   const sx = Math.round(x0 * pageCanvas.width);
   const sy = Math.round(y0 * pageCanvas.height);

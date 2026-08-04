@@ -137,7 +137,8 @@ test('filterFigures：关键词白名单+曲线黑名单+上限', async () => {
   ];
   const out = filterFigures(figs, { pkgCount: 5 });
   assert.equal(out.filter((f) => f.kind === 'block_diagram').length, 1);
-  assert.equal(out.filter((f) => f.kind === 'application').length, 2);
+  // v0.8.8：应用参考电路上限提到 3 张（用户可保留多个）
+  assert.equal(out.filter((f) => f.kind === 'application').length, 3);
   assert.equal(out.filter((f) => f.kind === 'pin_configuration').length, 1);
   assert.ok(!out.some((f) => /Curves|vs Frequency|Random/.test(f.title)));
   // 带 Figure 编号的优先于无编号标题

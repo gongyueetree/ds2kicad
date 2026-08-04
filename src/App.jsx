@@ -19,6 +19,7 @@ export default function App() {
   const [file, setFile] = useState(null); // 上传模式的本地 PDF File
   const [session, setSession] = useState(null); // ezPLM 会话：{origin, nonce, jobId}
   const [reviewReason, setReviewReason] = useState('');   // item 6：统一审核理由（所有人工修改共用）
+  const [recropFigureId, setRecropFigureId] = useState(null);  // 图集「重新框选」跳转目标
   // item 2：审核身份只能来自 ezPLM 已认证会话（服务端从 JWT 取出），前端不再自填
   const [phase, setPhase] = useState('idle');
   const [error, setError] = useState('');
@@ -395,14 +396,23 @@ export default function App() {
               />
             )}
             {confirmTab === 'figs' && (
-              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} jobId={extract.jobId} revision={extract.revision} />
+              <FigureEditor pdfUrl={extract.pdfUrl} figures={figures} aiFigures={extract.figures} onChange={setFigures} mock={extract.mock} jobId={extract.jobId} revision={extract.revision} focusFigureId={recropFigureId} />
             )}
           </section>
 
           {figures.length > 0 && (
             <section className="card">
               <h2>截取图集 <span className="sub-hint">随 ④ 的框选与确认实时更新，标注含类型/页码/标题</span></h2>
-              <FigureGallery pdfUrl={extract.pdfUrl} figures={figures} />
+              <FigureGallery
+                pdfUrl={extract.pdfUrl}
+                figures={figures}
+                onChange={setFigures}
+                onRecrop={(figureId) => {
+                  setConfirmTab('figs');
+                  setRecropFigureId(figureId);
+                  document.querySelector('.figure-editor')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+              />
             </section>
           )}
 

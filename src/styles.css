@@ -138,3 +138,15 @@ footer a { color: var(--brand); }
 .upload-btn { cursor: pointer; display: inline-block; }
 .upload-row .src-badge { display: inline-flex; align-items: center; gap: 4px; }
 .chip-link { background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; text-decoration: underline dotted; }
+
+/* v0.8.8 图集审核卡片 */
+.fig-kind-row { display: flex; gap: 6px; align-items: center; width: 100%; margin-bottom: 4px; }
+.fig-kind-row select { width: auto; min-width: 130px; padding: 3px 8px; font-size: 12px; }
+.fig-actions { display: flex; gap: 6px; flex-wrap: wrap; width: 100%; margin-top: 6px; align-items: center; }
+.fig-actions .btn-ghost { font-size: 12px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.fig-actions .btn-ghost.danger:hover { color: #b42318; border-color: #f2a7a7; }
+.fig-actions .btn-primary, .fig-actions .btn-secondary { font-size: 12px; padding: 4px 12px; }
+.fig-card img { max-height: 320px; object-fit: contain; }
+.fig-zoom { position: fixed; inset: 0; background: rgba(12,18,26,.86); z-index: 999; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; cursor: zoom-out; padding: 24px; }
+.fig-zoom img { max-width: 94vw; max-height: 86vh; background: #fff; border-radius: 8px; }
+.fig-zoom .hint { color: #cfe3d8; }
