@@ -1,7 +1,7 @@
 {
   "name": "ds2kicad",
   "private": true,
-  "version": "0.8.14",
+  "version": "0.8.16",
   "type": "module",
   "description": "Datasheet → KiCad symbol / footprint / 3D model extractor with in-browser preview (eetree / ezPLM)",
   "scripts": {

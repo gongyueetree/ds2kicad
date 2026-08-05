@@ -4,6 +4,7 @@
 // 三态外部依赖开关（.env 控制，与 AltPart AI 同款模式）：
 //   GEMINI_API_KEY 未配置或 MOCK_MODE=1 → 返回内置 TMUXL27518 演示数据（mock:true）
 import { validatePdfUrl, sanitizePins, sanitizePinsDetailed, sanitizePinsets, sanitizePackage, sanitizeFigures, guessFamily } from '../lib/validate.js';
+import { mergeFigureCandidates } from '../lib/figfilter.js';
 import { extractWithGemini } from '../lib/gemini.js';
 import { signPdfToken } from '../lib/pdftoken.js';
 import { getJobStore, sha256 } from '../lib/jobstore.js';
@@ -303,7 +304,10 @@ async function handleExtract(req, res) {
     const pinsReviewRequired = recDet.reviewRequired;
     const { filterFiguresDetailed } = await import('../lib/figfilter.js');
     const figFiltered = filterFiguresDetailed(
-      need.figures ? sanitizeFigures(raw?.figures) : sanitizeFigures(det.figures),
+      // DSK-013：此前是"解析器有结果就不要 AI 的、没有才用 AI 的"二选一。
+      // 于是同一份 PDF 因模型波动会得到 2 张 / 0 张两种结果，可导出图集不稳定。
+      // 改为**始终合并**：解析器结果（确定性、可复现）优先，AI 结果只补充解析器没找到的图。
+      mergeFigureCandidates(sanitizeFigures(det.figures), sanitizeFigures(raw?.figures)),
       { pkgCount: packages.length }
     );
     const figures = figFiltered.figures;
@@ -323,7 +327,7 @@ async function handleExtract(req, res) {
         part: need.part ? 'gemini' : 'parser',
         packages: 'gemini',
         pins: need.pins ? 'gemini' : 'parser',
-        figures: need.figures ? 'gemini' : 'parser'
+        figures: (det.figures || []).length ? ((raw?.figures || []).length ? 'parser+gemini' : 'parser') : 'gemini'
       },
       ...(await (async () => {
         const store = await getJobStore();     // item 1：显式获取，禁止依赖外层未定义变量

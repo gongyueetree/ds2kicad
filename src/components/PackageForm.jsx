@@ -1,5 +1,5 @@
 // src/components/PackageForm.jsx — 封装参数确认表单（确定性封装引擎的输入）
-import { PACKAGE_TYPES } from '../../lib/validate.js';
+import { PACKAGE_TYPES, UNSUPPORTED_FAMILY_NOTES } from '../../lib/validate.js';
 
 const FAMILY_LABEL = { dual: '双列贴片（SOIC/TSSOP/MSOP…）', qfn: 'QFN/DFN（含 EP）', dip: 'DIP 通孔', sot23: 'SOT-23（3 脚）', bga: 'BGA/DSBGA（暂仅符号）' };
 
@@ -35,10 +35,25 @@ export default function PackageForm({ packages, selectedIndex, pkg, pinsets = []
           数据手册中的封装候选：
           <select value={selectedIndex} onChange={(e) => onSelect(Number(e.target.value))}>
             {packages.map((p, i) => (
-              <option key={i} value={i}>{p.include === false ? '✗ ' : '✓ '}{p.name}{p.tiCode ? `（${p.tiCode}）` : ''} · {p.pinCount} 脚</option>
+              <option key={i} value={i}>
+                {p.include === false ? '✗ ' : '✓ '}{p.name}{p.tiCode ? `（${p.tiCode}）` : ''} · {p.pinCount} 脚
+                {p.familySupported === false ? ' · ⚠ 不支持生成封装' : ''}
+              </option>
             ))}
           </select>
         </label>
+      )}
+      {/* DSK-003：此前 familySupported 从未在前端出现，用户勾选后生成才发现出不来封装。
+          候选列表与勾选框旁必须在**生成前**就说清能不能出封装。 */}
+      {pkg.familySupported === false && (
+        <div className="warn-box">
+          <p><b>⚠ 该封装家族暂不支持生成封装与 3D，勾选后只会得到原理图符号。</b></p>
+          <p>
+            识别为 <code>{pkg.family}</code>
+            {UNSUPPORTED_FAMILY_NOTES?.[pkg.family] ? ` —— ${UNSUPPORTED_FAMILY_NOTES[pkg.family]}` : ''}。
+            若判定有误，可在下方「封装类型」中改成受支持的类型（{['dual', 'qfn', 'dip', 'sot23'].join(' / ')}）后重试。
+          </p>
+        </div>
       )}
       <label className="pkg-include">
         <input
@@ -46,7 +61,10 @@ export default function PackageForm({ packages, selectedIndex, pkg, pinsets = []
           checked={pkg.include !== false}
           onChange={(e) => onChange({ ...pkg, include: e.target.checked })}
         />
-        将此封装包含在生成中（每个勾选的封装各生成一套 .kicad_mod + .wrl）
+        将此封装包含在生成中
+        {pkg.familySupported === false
+          ? <b>（该封装仅生成符号，不会产出 .kicad_mod / .wrl）</b>
+          : '（每个勾选的封装各生成一套 .kicad_mod + .wrl）'}
       </label>
       {(pkg.drawingId || pkg.orderableParts?.length > 0 || pkg.sourcePages?.length > 0) && (
         <p className="hint pkg-evidence">

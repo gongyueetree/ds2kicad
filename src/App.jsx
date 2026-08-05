@@ -65,7 +65,15 @@ export default function App() {
     const theFile = fileOverride || null;
     const useFile = !!theFile;
     const u = useFile ? `local:${theFile.name}` : (targetUrl || url).trim();
-    if (!u) return;
+    // DSK-008：此前 URL 为空时静默 return，页面毫无反馈。必填与格式校验就地给出。
+    if (!u) {
+      setError('请填写数据手册 URL，或改用「上传本地 PDF」');
+      return;
+    }
+    if (!useFile && !/^https?:\/\/[^\s]+$/i.test(u)) {
+      setError(`URL 格式不正确：${u}。需以 http:// 或 https:// 开头`);
+      return;
+    }
     if (!useFile && file) setFile(null); // URL 提取开始即清除文件芯片，避免来源混淆
     setPhase('extracting');
     setError('');

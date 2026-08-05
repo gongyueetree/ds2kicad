@@ -7,6 +7,9 @@ const el = (tag, a = {}) => {
   return e;
 };
 
+/** 旧版符号布局里相邻管脚的固定行距（legacy 单位，见 kicadgen/symbol.js 的 MIL=100） */
+const PIN_PITCH = 100;
+
 export function renderLegacySymbol(txt, svg, selectedUnit = 1) {
   svg.innerHTML = '';
   const vb = svg.viewBox?.baseVal;
@@ -65,8 +68,15 @@ export function renderLegacySymbol(txt, svg, selectedUnit = 1) {
       if (ori === 'U') y2 += len; if (ori === 'D') y2 -= len;
       const pinG = el('g', { 'data-pin': num, class: 'hit-pin' });
       g.appendChild(pinG);
-      // 加宽的透明命中区，便于点击细线
-      pinG.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: 'transparent', 'stroke-width': 40 / scale }));
+      // DSK-011：命中区此前恒为 `40 / scale`，即固定 40 **屏幕像素**宽；
+      // 而相邻管脚在用户坐标里只隔 PIN_PITCH(=100) 单位。符号一密 scale 就小，
+      // 40/scale 会超过 100，相邻命中区互相重叠 —— 后绘制的管脚盖住先绘制的，
+      // 于是点 1 命中 3、点 4 命中 6。这里把宽度钳制在管脚间距的 72% 以内。
+      const hitW = Math.min(40 / scale, PIN_PITCH * 0.72);
+      pinG.appendChild(el('line', {
+        x1: x, y1: y, x2, y2, stroke: 'transparent', 'stroke-width': hitW,
+        'stroke-linecap': 'butt', 'pointer-events': 'stroke'
+      }));
       pinG.appendChild(el('line', { x1: x, y1: y, x2, y2, stroke: '#8a0e0e', 'stroke-width': 1.8 / scale, class: 'pin-stroke' }));
       pinG.appendChild(el('circle', { cx: x, cy: y, r: 9, fill: 'none', stroke: '#8a0e0e', 'stroke-width': 1.3 / scale, class: 'pin-stroke' }));
 

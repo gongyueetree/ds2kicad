@@ -165,3 +165,8 @@ footer a { color: var(--brand); }
 .review-help summary { cursor: pointer; color: var(--muted, #667); }
 .review-help ul { margin: 8px 0 0; padding-left: 20px; }
 .review-help li { margin-bottom: 6px; line-height: 1.6; }
+
+/* ── v0.8.15 提示块 ── */
+.warn-box { background: #fffaf3; border: 1px solid #f0d9b5; border-radius: 8px; padding: 10px 12px; margin: 8px 0; font-size: 13px; line-height: 1.7; }
+.warn-box p { margin: 0 0 6px; }
+.warn-box p:last-child { margin-bottom: 0; }
