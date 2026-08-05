@@ -292,3 +292,81 @@ test('DSK-013 输出顺序稳定：与上游数组顺序无关', async () => {
   assert.equal(k(a), k(b));
   assert.equal(k(a), '1|block_diagram,7|package_outline', '按页码 + 类型稳定排序');
 });
+
+/* ══════════ DSK-014：QFN 3D 端子被本体吞没（看起来"连在一起"）══════════ */
+
+/** 从 WRL 里解析所有 Box 节点（毫米） */
+function wrlBoxes(wrl) {
+  return [...wrl.matchAll(/translation (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) children.*?Box \{ size ([\d.]+) ([\d.]+) ([\d.]+)/g)]
+    .map((m) => ({
+      x: +m[1] * 2.54, y: +m[2] * 2.54, z: +m[3] * 2.54,
+      sx: +m[4] * 2.54, sy: +m[5] * 2.54, sz: +m[6] * 2.54
+    }));
+}
+const qfnPkg = () => sanitizePackage({
+  name: 'WQFN-24', type: 'WQFN', pinCount: 24, pitch: 0.5,
+  bodyLength: 4, bodyWidth: 4, height: 0.8, leadLength: 0.4, epLength: 2.45, epWidth: 2.45
+});
+
+test('DSK-014 复现缺陷：QFN 端子不得与本体竖直互穿', async () => {
+  const { generateWrl } = await import('../lib/kicadgen/model3d.js');
+  const boxes = wrlBoxes(generateWrl({ pkg: qfnPkg() }));
+  const body = boxes.reduce((a, c) => (c.sx * c.sz > a.sx * a.sz ? c : a));
+  const terms = boxes.filter((b) => b !== body);
+  const bodyBottom = body.y - body.sy / 2;
+  const termTop = Math.max(...terms.map((t) => t.y + t.sy / 2));
+  assert.ok(termTop <= bodyBottom + 0.01,
+    `端子顶(${termTop.toFixed(3)}mm) 高于本体底(${bodyBottom.toFixed(3)}mm) → 端子被埋进环氧，只剩边缘可见`);
+});
+
+test('DSK-014 端子必须离散：相邻端子之间有正缝隙', async () => {
+  const { generateWrl } = await import('../lib/kicadgen/model3d.js');
+  const boxes = wrlBoxes(generateWrl({ pkg: qfnPkg() }));
+  const body = boxes.reduce((a, c) => (c.sx * c.sz > a.sx * a.sz ? c : a));
+  // 左列端子的 x 恒为 -(bodyLength/2 - leadLength/2) = -1.8；
+  // 不能只按 "x < -1" 过滤 —— 上下两排最外侧的端子 x 也到 -1.25，会被误收进来。
+  const left = boxes.filter((b) => b !== body && Math.abs(b.x + 1.8) < 0.02).sort((a, c) => a.z - c.z);
+  assert.equal(left.length, 6, `WQFN-24 每边应 6 个端子，实际 ${left.length}`);
+  for (let i = 1; i < left.length; i++) {
+    const gap = (left[i].z - left[i].sz / 2) - (left[i - 1].z + left[i - 1].sz / 2);
+    assert.ok(gap > 0.05, `第 ${i} 与第 ${i + 1} 个端子缝隙仅 ${gap.toFixed(3)}mm，会看成连在一起`);
+  }
+});
+
+test('DSK-014 EP 必须可见（与端子同层），不得埋进本体', async () => {
+  const { generateWrl } = await import('../lib/kicadgen/model3d.js');
+  const boxes = wrlBoxes(generateWrl({ pkg: qfnPkg() }));
+  const body = boxes.reduce((a, c) => (c.sx * c.sz > a.sx * a.sz ? c : a));
+  const ep = boxes.find((b) => b !== body && Math.abs(b.x) < 0.01 && Math.abs(b.z) < 0.01);
+  assert.ok(ep, '应存在 EP 节点');
+  assert.ok(ep.y + ep.sy / 2 <= body.y - body.sy / 2 + 0.01, 'EP 不得埋在本体内部');
+  assert.ok(Math.abs(ep.sx - 2.45) < 0.01 && Math.abs(ep.sz - 2.45) < 0.01, 'EP 尺寸应取手册值');
+});
+
+test('DSK-014 总高仍等于手册标称（端子层 + 本体，不得溢出）', async () => {
+  const { generateWrl } = await import('../lib/kicadgen/model3d.js');
+  const boxes = wrlBoxes(generateWrl({ pkg: qfnPkg() }));
+  const top = Math.max(...boxes.map((b) => b.y + b.sy / 2));
+  const bottom = Math.min(...boxes.map((b) => b.y - b.sy / 2));
+  assert.ok(Math.abs(top - 0.8) < 0.02, `总高应为 0.8mm，实际 ${top.toFixed(3)}`);
+  assert.ok(Math.abs(bottom) < 0.01, `底面应落在 y=0，实际 ${bottom.toFixed(4)}mm`);   // WRL 按 1/2.54 缩放并 toFixed(4)，存在 ~1e-4 量级舍入
+});
+
+test('DSK-014 不得误伤其它封装族：dual / dip 的引脚本就在本体之外', async () => {
+  const { generateWrl } = await import('../lib/kicadgen/model3d.js');
+  const cases = [
+    sanitizePackage({ name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, height: 1.75, leadSpan: 6.0, leadLength: 1.0 }),
+    sanitizePackage({ name: 'PDIP-8', type: 'DIP', pinCount: 8, pitch: 2.54, bodyLength: 9.8, bodyWidth: 6.4, height: 4.0 })
+  ];
+  for (const pkg of cases) {
+    const boxes = wrlBoxes(generateWrl({ pkg }));
+    const body = boxes.reduce((a, c) => (c.sx * c.sz > a.sx * a.sz ? c : a));
+    const leads = boxes.filter((b) => b !== body);
+    assert.ok(leads.length > 0, `${pkg.name} 应有引脚节点`);
+    // 引脚必须至少在某个方向探出本体（否则同样是"被吞没"）
+    const outside = leads.filter((l) =>
+      Math.abs(l.x) + l.sx / 2 > body.x + body.sx / 2 + 0.01 ||
+      l.y - l.sy / 2 < body.y - body.sy / 2 - 0.01);
+    assert.ok(outside.length >= leads.length / 2, `${pkg.name}: 多数引脚未探出本体`);
+  }
+});
