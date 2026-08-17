@@ -370,3 +370,82 @@ test('DSK-014 不得误伤其它封装族：dual / dip 的引脚本就在本体�
     assert.ok(outside.length >= leads.length / 2, `${pkg.name}: 多数引脚未探出本体`);
   }
 });
+
+/* ══════════ DSK-015：几何守卫容差过松导致比例失真 ══════════ */
+
+test('DSK-015 复现缺陷：SOT23-5 的 bodyLength=4.9mm 必须被 JEDEC 先验拦下', async () => {
+  const { normalizeGeometryDetailed } = await import('../lib/kicadgen/geometry.js');
+  // 现场输入：AI 把 SOT23-5 的本体长读成 4.9mm（SOIC-8 的长度），误差 +69%
+  const sane = sanitizePackage({
+    name: 'SOT23-5', type: 'SOT-23-5', pinCount: 5, pitch: 0.95,
+    bodyLength: 4.9, bodyWidth: 1.6, height: 1.1, leadSpan: 2.8, leadLength: 0.4
+  });
+  const { normalizedPackage: g, transformations } = normalizeGeometryDetailed(sane);
+  assert.equal(g.bodyLength, 2.9, `修复前 4.9 恰好卡在 prior*1.7=4.93 之下溜过，实际 ${g.bodyLength}`);
+  const sub = transformations.find((t) => t.op === 'jedec_prior_substitution' && t.field === 'bodyLength');
+  assert.ok(sub, '必须留下先验替换记录');
+  assert.equal(sub.from, 4.9);
+  assert.equal(sub.to, 2.9);
+});
+
+test('DSK-015 端到端：封装文件名 / 焊盘跨度 / 3D 长宽比三者与标称一致', async () => {
+  const pkg = sanitizePackage({
+    name: 'SOT23-5', type: 'SOT-23-5', pinCount: 5, pitch: 0.95,
+    bodyLength: 4.9, bodyWidth: 1.6, height: 1.1, leadSpan: 2.8, leadLength: 0.4
+  });
+  const pins = ['+In', '-Vs', '-In', 'Out', '+Vs'].map((n, i) => ({ number: String(i + 1), name: n, type: 'passive' }));
+  const b = generateBundle({ part: { mpn: 'LMV331X' }, items: [{ pkg, pins }] });
+  const it = b.items[0];
+
+  assert.match(it.names.kicadMod, /1\.6x2\.9mm/, `文件名应含标称尺寸，实际 ${it.names.kicadMod}`);
+
+  // 焊盘沿引脚方向的跨度 = (每边3脚 - 1) × 0.95 = 1.90mm
+  const pads = [...it.files.kicadMod.matchAll(/\(pad "(\d+)" smd [^\n]*?\(at (-?[\d.]+) (-?[\d.]+)\)/g)]
+    .map((m) => ({ x: +m[2], y: +m[3] }));
+  assert.equal(pads.length, 5);
+  const ySpan = Math.max(...pads.map((p) => p.y)) - Math.min(...pads.map((p) => p.y));
+  assert.ok(Math.abs(ySpan - 1.9) < 0.01, `焊盘跨度应为 1.90mm，实际 ${ySpan.toFixed(2)}`);
+
+  // 3D 本体长宽比应为 2.9/1.6 ≈ 1.81，而非 4.9/1.6 ≈ 3.06
+  const boxes = [...it.files.wrl.matchAll(/Box \{ size ([\d.]+) ([\d.]+) ([\d.]+)/g)]
+    .map((m) => [+m[1] * 2.54, +m[2] * 2.54, +m[3] * 2.54]);
+  const body = boxes.reduce((a, c) => (c[0] * c[2] > a[0] * a[2] ? c : a));
+  const ratio = Math.max(body[0], body[2]) / Math.min(body[0], body[2]);
+  assert.ok(Math.abs(ratio - 1.81) < 0.15, `3D 长宽比应约 1.81，实际 ${ratio.toFixed(2)}（4.9mm 时会是 3.06）`);
+});
+
+test('DSK-015 长度上限不再使用绝对裕量（小封装曾形同虚设）', async () => {
+  const { normalizeGeometryDetailed } = await import('../lib/kicadgen/geometry.js');
+  // 用 TSSOP：它有 pitch/bodyWidth/leadSpan 先验但**没有 bodyLength 先验**
+  // （bodyLength 与引脚数相关，按设计不设先验），因此只能靠关系校验兜底。
+  // 6 脚 × 0.65mm → rowLen = 2×0.65 = 1.3mm；
+  // 旧上限 1.3 + max(4, 1.95) = 5.3mm 会放行 5.2mm 这种明显过长的值。
+  const sane = sanitizePackage({
+    name: 'TSSOP-6', type: 'TSSOP', pinCount: 6, pitch: 0.65,
+    bodyLength: 5.2, bodyWidth: 4.4, height: 1.2, leadSpan: 6.4, leadLength: 0.5
+  });
+  const { normalizedPackage: g } = normalizeGeometryDetailed(sane);
+  assert.ok(g.bodyLength < 5.0, `本体长 5.2mm 对每边 3 脚×0.65mm 明显不合理，应被派生，实际 ${g.bodyLength}`);
+  assert.equal(g.pitch, 0.65, 'pitch 是合法值，不得被先验改动（否则上限计算会跟着放宽）');
+});
+
+test('DSK-015 不得误伤：合法的同族变体与大封装不应被替换', async () => {
+  const { normalizeGeometryDetailed } = await import('../lib/kicadgen/geometry.js');
+  const cases = [
+    // 真实 SOT23-5 标称值
+    { in: { name: 'SOT23-5', type: 'SOT-23-5', pinCount: 5, pitch: 0.95, bodyLength: 2.9, bodyWidth: 1.6, height: 1.45, leadSpan: 2.8, leadLength: 0.4 }, expect: 2.9 },
+    // TSOT-23-5 薄型变体：height 差异大，但不应因此改动 bodyLength
+    { in: { name: 'TSOT-23-5', type: 'TSOT-23-5', pinCount: 5, pitch: 0.95, bodyLength: 2.9, bodyWidth: 1.6, height: 0.9, leadSpan: 2.8, leadLength: 0.4 }, expect: 2.9 },
+    // SC70-5
+    { in: { name: 'SOT353', type: 'SC70-5', pinCount: 5, pitch: 0.65, bodyLength: 2.0, bodyWidth: 1.25, height: 1.0, leadSpan: 2.1, leadLength: 0.3 }, expect: 2.0 },
+    // SOIC-8：无长度先验，靠关系校验，4.9mm 是合法值
+    { in: { name: 'SOIC-8', type: 'SOIC', pinCount: 8, pitch: 1.27, bodyLength: 4.9, bodyWidth: 3.9, height: 1.75, leadSpan: 6.0, leadLength: 1.0 }, expect: 4.9 },
+    // TSSOP-14：8.65mm 长，同样不得被误改
+    { in: { name: 'TSSOP-14', type: 'TSSOP', pinCount: 14, pitch: 0.65, bodyLength: 5.0, bodyWidth: 4.4, height: 1.1, leadSpan: 6.4, leadLength: 0.6 }, expect: 5.0 }
+  ];
+  for (const c of cases) {
+    const { normalizedPackage: g } = normalizeGeometryDetailed(sanitizePackage(c.in));
+    assert.ok(Math.abs(g.bodyLength - c.expect) < 0.01,
+      `${c.in.name}: bodyLength 应保持 ${c.expect}，实际 ${g.bodyLength}`);
+  }
+});
