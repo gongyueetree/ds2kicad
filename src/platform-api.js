@@ -35,3 +35,15 @@ export const apiCreateHandoff = (payload = {}) => request('/api/handoff', {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(payload)
 });
+
+export const apiSchematicConvert = (payload = {}) => request('/api/schematic-convert', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(payload)
+});
+
+export const apiSchematicBuild = (ir) => request('/api/schematic-build', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ ir })
+});
