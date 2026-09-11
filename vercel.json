@@ -6,7 +6,7 @@
   "functions": {
     "api/extract.js": { "maxDuration": 60 },
     "api/platform-extract.js": { "maxDuration": 60 },
-    "api/schematic-convert.js": { "maxDuration": 60 },
+    "api/schematic-convert.js": { "maxDuration": 180 },
     "api/schematic-build.js": { "maxDuration": 30 },
     "api/generate.js": { "maxDuration": 30 },
     "api/job-pdf.js": { "maxDuration": 30 },
