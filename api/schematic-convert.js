@@ -52,6 +52,7 @@ export default async function handler(req, res) {
   }
 
   const started = Date.now();
+  let stream = null;
   try {
     let pdfBuf = null;
     let fileName = String(body.fileName || 'schematic.pdf').slice(0, 160);
@@ -78,6 +79,13 @@ export default async function handler(req, res) {
       if (pdfBuf.subarray(0, 5).toString('latin1') !== '%PDF-') throw httpError(422, 'URL did not return a PDF');
     }
 
+    // A long AI call can leave a synchronous HTTP connection completely idle for >60s.
+    // Start a chunked JSON response before the model call and emit whitespace heartbeats.
+    // JSON parsers legally ignore the leading whitespace, while proxies/browsers see traffic.
+    if (!mock && process.env.SCHEMATIC_STREAM_HEARTBEAT !== '0') {
+      stream = beginJsonHeartbeat(res, Number(process.env.SCHEMATIC_HEARTBEAT_MS || 8000));
+    }
+
     let raw, model = 'mock', extraction = { attempts: 0, elapsedMs: 0 };
     if (mock) raw = MOCK_SCHEMATIC;
     else {
@@ -96,8 +104,7 @@ export default async function handler(req, res) {
     const ir = sanitizeSchematicIR(raw, { fileName, sourceUrl, model });
     const generated = buildSchematicFiles(ir);
     if (!mock) await commitCredit(reservation.reservationId);
-    try { res.setHeader('Cache-Control', 'no-store'); } catch {}
-    return res.status(200).json({
+    const payload = {
       ok: true,
       mode: 'connectivity_intelligence',
       ir,
@@ -108,7 +115,10 @@ export default async function handler(req, res) {
       extraction,
       chargedCredits: reservation.cost || 0,
       mock
-    });
+    };
+    if (stream) return stream.end(payload);
+    try { res.setHeader('Cache-Control', 'no-store'); } catch {}
+    return res.status(200).json(payload);
   } catch (e) {
     if (!mock) {
       try { await refundCredit(reservation.reservationId); }
@@ -116,15 +126,52 @@ export default async function handler(req, res) {
     }
     const status = Number(e.status || (e.code === 'schematic_extraction_timeout' ? 504 : 500));
     console.error('[schematic-convert]', { code: e.code, message: e.message, elapsedMs: Date.now() - started });
-    return res.status(status).json({
+    const payload = {
+      ok: false,
       error: e.code === 'schematic_extraction_timeout'
         ? 'Connectivity 提取超时；系统已自动重试。请再次提交，或使用更小/更清晰的 PDF。'
         : (e.message || 'schematic conversion failed'),
       detail: e.message || null,
       code: e.code || 'schematic_conversion_failed',
+      status,
       elapsedMs: Date.now() - started
-    });
+    };
+    // Once streaming headers have been flushed the HTTP status is already 200.
+    // Preserve the real status inside the JSON payload; the client converts it back to an exception.
+    if (stream) return stream.end(payload);
+    return res.status(status).json(payload);
   }
+}
+
+function beginJsonHeartbeat(res, intervalMs = 8000) {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('X-Connectivity-Streaming', 'heartbeat-v1');
+  try { res.flushHeaders?.(); } catch {}
+
+  const beat = () => {
+    if (res.writableEnded || res.destroyed) return;
+    try {
+      // 1 KiB of legal JSON whitespace helps defeat intermediary buffering/idle connection expiry.
+      res.write(`\n${' '.repeat(1024)}`);
+    } catch {}
+  };
+  beat();
+  const timer = setInterval(beat, Math.max(3000, Math.min(20000, Number(intervalMs) || 8000)));
+  timer.unref?.();
+  const stop = () => clearInterval(timer);
+  res.once('finish', stop);
+  res.once('close', stop);
+
+  return {
+    end(payload) {
+      stop();
+      if (res.writableEnded || res.destroyed) return;
+      try { res.end(JSON.stringify(payload)); } catch {}
+    }
+  };
 }
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
