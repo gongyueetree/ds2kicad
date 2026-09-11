@@ -1,4 +1,4 @@
-// PDF/image-schematic -> Canonical Schematic IR -> KiCad files.
+// PDF/image-schematic -> Canonical Connectivity IR -> KiCad files.
 import { setCors } from './extract.js';
 import { authenticate } from '../lib/auth.js';
 import { reserveCredit, commitCredit, refundCredit } from '../lib/credits.js';
@@ -35,10 +35,9 @@ export default async function handler(req, res) {
   let reservation = { ok: true, reservationId: null, cost: 0 };
   if (!mock) {
     reservation = await reserveCredit(session, 'schematic_to_kicad', {
-      // Ensure a new guest can actually experience one schematic conversion even when the paid cost is higher.
       cost: session.guest ? Number(process.env.GUEST_SCHEMATIC_TRIAL_COST || 3) : undefined,
       refKey: req.headers?.['idempotency-key'] || null,
-      metadata: { channel: session.channel || 'direct', mode: 'schematic_reconstruction' }
+      metadata: { channel: session.channel || 'direct', mode: 'connectivity_extraction' }
     });
     if (!reservation.ok) {
       return res.status(402).json({
@@ -52,6 +51,7 @@ export default async function handler(req, res) {
     }
   }
 
+  const started = Date.now();
   try {
     let pdfBuf = null;
     let fileName = String(body.fileName || 'schematic.pdf').slice(0, 160);
@@ -71,14 +71,14 @@ export default async function handler(req, res) {
       const { safeDownload } = await import('../lib/safedl.js');
       const dl = await safeDownload(v.url, {
         maxBytes: Number(process.env.MAX_PDF_MB || 15) * 1024 * 1024,
-        timeoutMs: 28000,
-        headers: { 'User-Agent':'Mozilla/5.0 DS2KiCad/1.0', 'Accept':'application/pdf,*/*;q=0.8' }
+        timeoutMs: Math.min(40000, Number(process.env.SCHEMATIC_DOWNLOAD_TIMEOUT_MS || 28000)),
+        headers: { 'User-Agent':'Mozilla/5.0 ConnectivityIntelligenceEngine/1.0', 'Accept':'application/pdf,*/*;q=0.8' }
       });
       pdfBuf = dl.buf;
       if (pdfBuf.subarray(0, 5).toString('latin1') !== '%PDF-') throw httpError(422, 'URL did not return a PDF');
     }
 
-    let raw, model = 'mock';
+    let raw, model = 'mock', extraction = { attempts: 0, elapsedMs: 0 };
     if (mock) raw = MOCK_SCHEMATIC;
     else {
       const extracted = await extractSchematicWithGemini({
@@ -86,9 +86,11 @@ export default async function handler(req, res) {
         apiKey: process.env.GEMINI_API_KEY,
         model: process.env.SCHEMATIC_MODEL || process.env.GEMINI_MODEL,
         fileName,
-        deadlineMs: Number(process.env.SCHEMATIC_EXTRACT_BUDGET_MS || 52000)
+        deadlineMs: Number(process.env.SCHEMATIC_EXTRACT_BUDGET_MS || 145000)
       });
-      raw = extracted.raw; model = extracted.model;
+      raw = extracted.raw;
+      model = extracted.model;
+      extraction = { attempts: extracted.attempts || 1, elapsedMs: extracted.elapsedMs || (Date.now() - started) };
     }
 
     const ir = sanitizeSchematicIR(raw, { fileName, sourceUrl, model });
@@ -97,12 +99,13 @@ export default async function handler(req, res) {
     try { res.setHeader('Cache-Control', 'no-store'); } catch {}
     return res.status(200).json({
       ok: true,
-      mode: 'schematic_reconstruction',
+      mode: 'connectivity_intelligence',
       ir,
       summary: summarizeSchematicIR(ir),
       files: generated.files,
       previewSvg: generated.previewSvg,
       report: generated.report,
+      extraction,
       chargedCredits: reservation.cost || 0,
       mock
     });
@@ -111,9 +114,16 @@ export default async function handler(req, res) {
       try { await refundCredit(reservation.reservationId); }
       catch (billingError) { console.error('[schematic-convert] refund failed', billingError); }
     }
-    const status = Number(e.status || 500);
-    console.error('[schematic-convert]', e);
-    return res.status(status).json({ error: e.message || 'schematic conversion failed', code: e.code || 'schematic_conversion_failed' });
+    const status = Number(e.status || (e.code === 'schematic_extraction_timeout' ? 504 : 500));
+    console.error('[schematic-convert]', { code: e.code, message: e.message, elapsedMs: Date.now() - started });
+    return res.status(status).json({
+      error: e.code === 'schematic_extraction_timeout'
+        ? 'Connectivity 提取超时；系统已自动重试。请再次提交，或使用更小/更清晰的 PDF。'
+        : (e.message || 'schematic conversion failed'),
+      detail: e.message || null,
+      code: e.code || 'schematic_conversion_failed',
+      elapsedMs: Date.now() - started
+    });
   }
 }
 
