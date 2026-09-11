@@ -19,6 +19,15 @@ const raw = {
   nets:[{name:'LED_A',confidence:.95,endpoints:[{ref:'R1',pin:'2'},{ref:'D1',pin:'1'}]}]
 };
 
+function balancedSexpr(text) {
+  let depth=0, quoted=false, escaped=false;
+  for(const ch of text){
+    if(quoted){ if(escaped)escaped=false; else if(ch==='\\')escaped=true; else if(ch==='"')quoted=false; continue; }
+    if(ch==='"'){quoted=true;continue;} if(ch==='(')depth++; else if(ch===')')depth--; if(depth<0)return false;
+  }
+  return depth===0&&!quoted;
+}
+
 test('schematic IR resolves common KiCad library hints and nets', () => {
   const ir = sanitizeSchematicIR(raw, { fileName:'fixture.pdf', model:'stub' });
   assert.equal(ir.schemaVersion, 'ds2kicad.schematic-ir.v1');
@@ -30,15 +39,21 @@ test('schematic IR resolves common KiCad library hints and nets', () => {
   assert.equal(summarizeSchematicIR(ir).components, 2);
 });
 
-test('modern KiCad schematic contains symbols and electrical net labels', () => {
+test('modern KiCad schematic contains complete symbol instances and electrical labels', () => {
   const ir = sanitizeSchematicIR(raw);
   const sch = generateModernSchematic(ir).content;
   assert.match(sch, /^\(kicad_sch/);
+  assert.ok(balancedSexpr(sch));
+  assert.match(sch, /\(generator_version "1\.0"\)/);
   assert.match(sch, /\(lib_symbols/);
   assert.match(sch, /\(lib_id "Device:R"\)/);
   assert.match(sch, /\(property "Reference" "R1"/);
+  assert.match(sch, /\(pin "1" \(uuid [0-9a-f-]+\)\)/);
+  assert.match(sch, /\(instances\s+\(project "reconstructed"/);
+  assert.match(sch, /\(reference "R1"\)/);
   assert.equal((sch.match(/\(label "LED_A"/g)||[]).length, 2);
   assert.match(sch, /\(sheet_instances/);
+  assert.match(sch, /\(embedded_fonts no\)/);
 });
 
 test('bundle includes modern and legacy fallback files', () => {
@@ -49,6 +64,7 @@ test('bundle includes modern and legacy fallback files', () => {
   assert.ok(names.includes('reconstructed.sch'));
   assert.ok(names.includes('reconstructed-cache.lib'));
   assert.ok(names.includes('schematic-ir.json'));
+  assert.ok(names.includes('conversion-report.json'));
   assert.match(out.previewSvg, /<svg/);
 });
 
