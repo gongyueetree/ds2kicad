@@ -14,3 +14,5 @@ Rules:
 - 3D is approximate/parametric, not a vendor STEP model.
 
 The viewer now surfaces generator warnings/reasons when a footprint is blocked instead of showing only a generic empty state.
+
+Verification includes a KXTJ3-style 12-LGA fixture that asserts 12 KiCad pads, a generated `.kicad_mod`, an approximate WRL model, and fail-closed behavior when terminal geometry is missing.
