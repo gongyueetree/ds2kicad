@@ -1,4 +1,4 @@
-// PDF/image-schematic -> Canonical Connectivity IR -> KiCad files.
+// PDF/image-schematic -> Source Census -> Canonical Connectivity IR -> quality gate -> KiCad files.
 import { setCors } from './extract.js';
 import { authenticate } from '../lib/auth.js';
 import { reserveCredit, commitCredit, refundCredit } from '../lib/credits.js';
@@ -7,6 +7,8 @@ import { validatePdfUrl } from '../lib/validate.js';
 import { extractSchematicWithGemini } from '../lib/schematic/gemini.js';
 import { sanitizeSchematicIR, summarizeSchematicIR } from '../lib/schematic/ir.js';
 import { buildSchematicFiles } from '../lib/schematic/kicad.js';
+import { censusPdf, censusPromptHints } from '../lib/schematic/source-census.js';
+import { applyConnectivityQuality, qualitySummary } from '../lib/connectivity/quality.js';
 
 const MOCK_SCHEMATIC = {
   title: 'Schematic Reconstruction Demo', pageCount: 1, confidence: 0.94,
@@ -53,6 +55,7 @@ export default async function handler(req, res) {
 
   const started = Date.now();
   let stream = null;
+  let creditFinalized = false;
   try {
     let pdfBuf = null;
     let fileName = String(body.fileName || 'schematic.pdf').slice(0, 160);
@@ -79,9 +82,12 @@ export default async function handler(req, res) {
       if (pdfBuf.subarray(0, 5).toString('latin1') !== '%PDF-') throw httpError(422, 'URL did not return a PDF');
     }
 
-    // A long AI call can leave a synchronous HTTP connection completely idle for >60s.
-    // Start a chunked JSON response before the model call and emit whitespace heartbeats.
-    // JSON parsers legally ignore the leading whitespace, while proxies/browsers see traffic.
+    // Zero-token source census runs before the model and becomes a completeness checklist.
+    const census = mock
+      ? { available:false, method:'mock', references:[], netLabels:[], gateNetLabels:[], partHints:[] }
+      : await censusPdf(pdfBuf, { maxPages:Number(process.env.SCHEMATIC_CENSUS_MAX_PAGES || 3) });
+
+    // Keep the long model call alive through proxies/browser connections.
     if (!mock && process.env.SCHEMATIC_STREAM_HEARTBEAT !== '0') {
       stream = beginJsonHeartbeat(res, Number(process.env.SCHEMATIC_HEARTBEAT_MS || 8000));
     }
@@ -94,6 +100,7 @@ export default async function handler(req, res) {
         apiKey: process.env.GEMINI_API_KEY,
         model: process.env.SCHEMATIC_MODEL || process.env.GEMINI_MODEL,
         fileName,
+        libraryHints: censusPromptHints(census),
         deadlineMs: Number(process.env.SCHEMATIC_EXTRACT_BUDGET_MS || 145000)
       });
       raw = extracted.raw;
@@ -101,26 +108,53 @@ export default async function handler(req, res) {
       extraction = { attempts: extracted.attempts || 1, elapsedMs: extracted.elapsedMs || (Date.now() - started) };
     }
 
-    const ir = sanitizeSchematicIR(raw, { fileName, sourceUrl, model });
-    const generated = buildSchematicFiles(ir);
-    if (!mock) await commitCredit(reservation.reservationId);
+    const baseIr = sanitizeSchematicIR(raw, { fileName, sourceUrl, model });
+    const ir = applyConnectivityQuality(baseIr, census);
+    const built = buildSchematicFiles(ir);
+    const exportAllowed = ir.qualityGate?.exportAllowed !== false;
+    const files = exportAllowed ? built.files : built.files.filter((x)=>/\.json$/i.test(x.path));
+    const previewSvg = exportAllowed ? built.previewSvg : null;
+    const report = {
+      ...built.report,
+      exportBlocked: !exportAllowed,
+      qualityGate: ir.qualityGate,
+      sourceCensus: census
+    };
+
+    // A model result rejected by the source-grounded gate is diagnostic, not billable output.
+    if (!mock) {
+      if (exportAllowed) await commitCredit(reservation.reservationId);
+      else await refundCredit(reservation.reservationId);
+      creditFinalized = true;
+    }
+
+    const summary = { ...summarizeSchematicIR(ir), ...qualitySummary(ir) };
     const payload = {
       ok: true,
       mode: 'connectivity_intelligence',
       ir,
-      summary: summarizeSchematicIR(ir),
-      files: generated.files,
-      previewSvg: generated.previewSvg,
-      report: generated.report,
-      extraction,
-      chargedCredits: reservation.cost || 0,
+      summary,
+      files,
+      previewSvg,
+      report,
+      extraction: {
+        ...extraction,
+        census: {
+          available: census.available,
+          references: census.references?.length || 0,
+          highConfidenceNetLabels: census.gateNetLabels?.length || 0,
+          partHints: census.partHints?.length || 0
+        }
+      },
+      qualityGate: ir.qualityGate,
+      chargedCredits: exportAllowed ? (reservation.cost || 0) : 0,
       mock
     };
     if (stream) return stream.end(payload);
     try { res.setHeader('Cache-Control', 'no-store'); } catch {}
     return res.status(200).json(payload);
   } catch (e) {
-    if (!mock) {
+    if (!mock && !creditFinalized) {
       try { await refundCredit(reservation.reservationId); }
       catch (billingError) { console.error('[schematic-convert] refund failed', billingError); }
     }
@@ -136,8 +170,6 @@ export default async function handler(req, res) {
       status,
       elapsedMs: Date.now() - started
     };
-    // Once streaming headers have been flushed the HTTP status is already 200.
-    // Preserve the real status inside the JSON payload; the client converts it back to an exception.
     if (stream) return stream.end(payload);
     return res.status(status).json(payload);
   }
@@ -150,13 +182,9 @@ function beginJsonHeartbeat(res, intervalMs = 8000) {
   res.setHeader('X-Accel-Buffering', 'no');
   res.setHeader('X-Connectivity-Streaming', 'heartbeat-v1');
   try { res.flushHeaders?.(); } catch {}
-
   const beat = () => {
     if (res.writableEnded || res.destroyed) return;
-    try {
-      // 1 KiB of legal JSON whitespace helps defeat intermediary buffering/idle connection expiry.
-      res.write(`\n${' '.repeat(1024)}`);
-    } catch {}
+    try { res.write(`\n${' '.repeat(1024)}`); } catch {}
   };
   beat();
   const timer = setInterval(beat, Math.max(3000, Math.min(20000, Number(intervalMs) || 8000)));
@@ -164,7 +192,6 @@ function beginJsonHeartbeat(res, intervalMs = 8000) {
   const stop = () => clearInterval(timer);
   res.once('finish', stop);
   res.once('close', stop);
-
   return {
     end(payload) {
       stop();
