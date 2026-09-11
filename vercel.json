@@ -4,26 +4,14 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/extract.js": {
-      "maxDuration": 60
-    },
-    "api/generate.js": {
-      "maxDuration": 30
-    },
-    "api/job-pdf.js": {
-      "maxDuration": 30
-    },
-    "api/figure-upload.js": {
-      "maxDuration": 30
-    },
-    "api/lifecycle.js": {
-      "maxDuration": 30
-    }
+    "api/extract.js": { "maxDuration": 60 },
+    "api/platform-extract.js": { "maxDuration": 60 },
+    "api/generate.js": { "maxDuration": 30 },
+    "api/job-pdf.js": { "maxDuration": 30 },
+    "api/figure-upload.js": { "maxDuration": 30 },
+    "api/lifecycle.js": { "maxDuration": 30 }
   },
   "rewrites": [
-    {
-      "source": "/((?!api/).*)",
-      "destination": "/index.html"
-    }
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }
