@@ -96,8 +96,24 @@ export default function SchematicConverter() {
     } finally { setBusy(false); }
   };
 
-  const setComponent=(idx,patch)=>setResult((r)=>({...r,ir:{...r.ir,components:r.ir.components.map((c,i)=>i===idx?{...c,...patch}:c)}}));
-  const setPin=(ci,pi,patch)=>setResult((r)=>({...r,ir:{...r.ir,components:r.ir.components.map((c,i)=>i===ci?{...c,pins:c.pins.map((p,j)=>j===pi?{...p,...patch}:p)}:c)}}));
+  // Ref/pin identity participates in the net graph. Edits must atomically rewrite endpoints and NC markers,
+  // otherwise a visually correct review would silently disconnect the generated schematic.
+  const setComponent=(idx,patch)=>setResult((r)=>{
+    const old=r.ir.components[idx]; if(!old)return r;
+    const next={...old,...patch}; const oldRef=old.ref; const nextRef=next.ref;
+    const components=r.ir.components.map((c,i)=>i===idx?next:c);
+    const nets=oldRef!==nextRef?r.ir.nets.map((n)=>({...n,endpoints:n.endpoints.map((e)=>e.ref===oldRef?{...e,ref:nextRef}:e)})):r.ir.nets;
+    const noConnects=oldRef!==nextRef?(r.ir.noConnects||[]).map((x)=>x.ref===oldRef?{...x,ref:nextRef}:x):(r.ir.noConnects||[]);
+    return {...r,ir:{...r.ir,components,nets,noConnects}};
+  });
+  const setPin=(ci,pi,patch)=>setResult((r)=>{
+    const comp=r.ir.components[ci]; const old=comp?.pins?.[pi]; if(!comp||!old)return r;
+    const next={...old,...patch}; const oldPin=old.number; const nextPin=next.number;
+    const components=r.ir.components.map((c,i)=>i===ci?{...c,pins:c.pins.map((p,j)=>j===pi?next:p)}:c);
+    const nets=oldPin!==nextPin?r.ir.nets.map((n)=>({...n,endpoints:n.endpoints.map((e)=>e.ref===comp.ref&&String(e.pin)===String(oldPin)?{...e,pin:nextPin}:e)})):r.ir.nets;
+    const noConnects=oldPin!==nextPin?(r.ir.noConnects||[]).map((x)=>x.ref===comp.ref&&String(x.pin)===String(oldPin)?{...x,pin:nextPin}:x):(r.ir.noConnects||[]);
+    return {...r,ir:{...r.ir,components,nets,noConnects}};
+  });
   const rebuild=async()=>{ if(!result?.ir)return; setRebuilding(true);setError('');try{const r=await apiSchematicBuild(result.ir);setResult((old)=>({...old,...r}));}catch(e){setError(e.message);}finally{setRebuilding(false);}};
 
   const modern=result?.files?.find((x)=>x.path.endsWith('.kicad_sch'));
