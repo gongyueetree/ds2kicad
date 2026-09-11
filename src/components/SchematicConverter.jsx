@@ -4,155 +4,48 @@ import JSZip from 'jszip';
 import { apiSchematicBuild, apiSchematicConvert } from '../platform-api.js';
 import './schematic-converter.css';
 
-const PIN_TYPES = ['input','output','bidirectional','power_in','power_out','passive','tri_state','open_collector','no_connect','unspecified'];
-const SIDES = ['left','right','top','bottom'];
-
-function locale() {
-  const p = new URLSearchParams(location.search);
-  const lang = p.get('lang') || p.get('locale') || '';
-  if (/^zh/i.test(lang)) return 'zh-CN';
-  if (/^en/i.test(lang)) return 'en-US';
-  const ch = (p.get('channel') || '').toLowerCase();
-  if (ch === 'eetree' || ch === 'ezplm') return 'zh-CN';
-  if (ch === 'tindie' || ch === 'eehub') return 'en-US';
-  return /^zh/i.test(navigator.language || '') ? 'zh-CN' : 'en-US';
-}
-
-const copy = {
-  'zh-CN': {
-    title:'PDF / 图片原理图 → KiCad', sub:'识别器件、管脚和网络连接，生成可编辑 KiCad 原理图。',
-    url:'原理图 PDF URL', start:'开始转换', converting:'识别并重建中…', upload:'或上传 PDF / PNG / JPG',
-    back:'元器件库生成', components:'器件', nets:'网络', confidence:'置信度', warnings:'需要复核',
-    preview:'重建预览', edit:'器件与管脚复核', rebuild:'按修改重新生成（不扣 Credit）', rebuilding:'重新生成中…',
-    download:'下载 .kicad_sch', zip:'下载完整工程 ZIP', ir:'下载 Schematic IR', ref:'位号', value:'型号 / 数值',
-    footprint:'封装', library:'符号来源 / Library ID', pins:'管脚', select:'选择器件编辑管脚', number:'编号', name:'名称', type:'属性', side:'位置',
-    net:'网络名', endpoints:'连接端点', evidence:'识别依据', note:'当前版本优先保证电气连接正确；低置信度管脚和网络请人工复核后用于生产。',
-    fileLarge:'上传文件超过 3MB，请压缩或使用 PDF URL。', badFile:'支持 PDF、PNG、JPG/JPEG。', noInput:'请输入 PDF URL 或上传文件。',
-    noResult:'转换完成后将在这里显示可编辑原理图。'
-  },
-  'en-US': {
-    title:'PDF / Image Schematic → KiCad', sub:'Recognize components, pins and connectivity, then generate an editable KiCad schematic.',
-    url:'Schematic PDF URL', start:'Convert schematic', converting:'Recognizing & rebuilding…', upload:'or upload PDF / PNG / JPG',
-    back:'Library generator', components:'Components', nets:'Nets', confidence:'Confidence', warnings:'Review needed',
-    preview:'Reconstruction preview', edit:'Component & pin review', rebuild:'Rebuild after edits (no Credit)', rebuilding:'Rebuilding…',
-    download:'Download .kicad_sch', zip:'Download complete ZIP', ir:'Download Schematic IR', ref:'Ref', value:'Part / value',
-    footprint:'Footprint', library:'Symbol / Library ID', pins:'Pins', select:'Select component to edit pins', number:'Number', name:'Name', type:'Type', side:'Side',
-    net:'Net', endpoints:'Endpoints', evidence:'Evidence', note:'This version prioritizes electrical connectivity. Review low-confidence pins/nets before production use.',
-    fileLarge:'Upload is over 3MB. Compress it or use a PDF URL.', badFile:'PDF, PNG and JPG/JPEG are supported.', noInput:'Enter a PDF URL or upload a file.',
-    noResult:'The editable reconstructed schematic will appear here.'
-  }
+const PIN_TYPES=['input','output','bidirectional','power_in','power_out','passive','tri_state','open_collector','no_connect','unspecified'];
+const SIDES=['left','right','top','bottom'];
+function locale(){const p=new URLSearchParams(location.search),lang=p.get('lang')||p.get('locale')||'';if(/^zh/i.test(lang))return'zh-CN';if(/^en/i.test(lang))return'en-US';const ch=(p.get('channel')||'').toLowerCase();if(ch==='eetree'||ch==='ezplm')return'zh-CN';if(ch==='tindie'||ch==='eehub')return'en-US';return /^zh/i.test(navigator.language||'')?'zh-CN':'en-US';}
+const copy={
+'zh-CN':{title:'Connectivity Intelligence Engine',sub:'从 PDF / 图片提取器件、管脚和真实网络连接；连接关系是核心数据，传统原理图只是一个可选渲染视图。',url:'原理图 / 电路图 PDF URL',start:'提取 Connectivity',converting:'识别连接关系中…',upload:'或上传 PDF / PNG / JPG',back:'元器件库引擎',components:'器件',nets:'网络',confidence:'提取置信度',issues:'ERC / 问题',health:'连接健康度',map:'连接图',interfaces:'接口',traditional:'传统原理图',power:'电源网络',edit:'器件 / Pin 复核',rebuild:'按修改重新分析（0 Token）',rebuilding:'重新分析中…',download:'下载 KiCad 原理图',zip:'下载完整工程 ZIP',ir:'下载 Connectivity IR',ref:'位号',value:'型号 / 数值',footprint:'封装',library:'符号来源',pins:'管脚',number:'编号',name:'名称',type:'属性',side:'位置',net:'网络',endpoints:'连接端点',evidence:'识别依据',note:'Graph ERC、接口识别、电源树和连接视图均为确定性计算，不调用大模型；只有从 PDF/图片提取候选连接关系时需要模型。',fileLarge:'上传文件超过 3MB，请压缩或使用 PDF URL。',badFile:'支持 PDF、PNG、JPG/JPEG。',noInput:'请输入 PDF URL 或上传文件。',noResult:'上传一张原理图后，这里会先显示 Connectivity IR，而不是先追求画出漂亮原理图。',searchNet:'搜索 Net / 器件',selectNet:'选择一个网络查看所有端点',peer:'连接到',status:'状态',complete:'完整',missing:'缺少',allGood:'没有发现确定性的 ERC 问题',severity:{error:'错误',warning:'警告',review:'需复核'},rendererNote:'此视图由 Connectivity IR 确定性生成，主要用于工程师视觉检查；布局美观不是 Source of Truth。'},
+'en-US':{title:'Connectivity Intelligence Engine',sub:'Extract components, pins and electrical connectivity from PDF/images. Connectivity is the source of truth; a traditional schematic is only an optional rendering.',url:'Schematic / circuit PDF URL',start:'Extract connectivity',converting:'Reconstructing connectivity…',upload:'or upload PDF / PNG / JPG',back:'Library Engine',components:'Components',nets:'Nets',confidence:'Extraction confidence',issues:'ERC / Issues',health:'Connectivity health',map:'Connection Map',interfaces:'Interfaces',traditional:'Traditional Schematic',power:'Power Rails',edit:'Component / Pin review',rebuild:'Re-analyze edits (0 Token)',rebuilding:'Re-analyzing…',download:'Download KiCad schematic',zip:'Download project ZIP',ir:'Download Connectivity IR',ref:'Ref',value:'Part / value',footprint:'Footprint',library:'Symbol source',pins:'Pins',number:'Number',name:'Name',type:'Type',side:'Side',net:'Net',endpoints:'Endpoints',evidence:'Evidence',note:'Graph ERC, interface detection, power-tree analysis and connectivity views are deterministic and use zero model tokens. A model is only used to extract candidate connectivity from the source PDF/image.',fileLarge:'Upload is over 3MB. Compress it or use a PDF URL.',badFile:'PDF, PNG and JPG/JPEG are supported.',noInput:'Enter a PDF URL or upload a file.',noResult:'Upload a schematic to inspect Connectivity IR first, rather than optimizing drawing aesthetics.',searchNet:'Search net / component',selectNet:'Select a net to inspect every endpoint',peer:'Connected to',status:'Status',complete:'Complete',missing:'Missing',allGood:'No deterministic ERC issues found',severity:{error:'Error',warning:'Warning',review:'Review'},rendererNote:'This view is deterministically rendered from Connectivity IR for human review. Drawing aesthetics are not the source of truth.'}}
 };
+async function imageToPdf(file){const buf=await file.arrayBuffer(),pdf=await PDFDocument.create(),image=(/png/i.test(file.type)||/\.png$/i.test(file.name))?await pdf.embedPng(buf):await pdf.embedJpg(buf),portrait=image.height>=image.width,pageSize=portrait?[595.28,841.89]:[841.89,595.28],[pw,ph]=pageSize,margin=12,scale=Math.min((pw-margin*2)/image.width,(ph-margin*2)/image.height),w=image.width*scale,h=image.height*scale,page=pdf.addPage(pageSize);page.drawImage(image,{x:(pw-w)/2,y:(ph-h)/2,width:w,height:h});const bytes=await pdf.save({useObjectStreams:true});return new File([bytes],`${file.name.replace(/\.[^.]+$/,'')||'connectivity'}.pdf`,{type:'application/pdf'});}
+function toBase64(buf){const bytes=new Uint8Array(buf);let bin='';for(let i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));return btoa(bin);}
+function saveText(name,content,type='text/plain'){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
+function modeHref(mode){const p=new URLSearchParams(location.search);p.set('mode',mode);return`${location.pathname}?${p.toString()}`;}
+function key(ref,pin){return`${ref}:${pin}`;}
+function pinNetIndex(ir){const m=new Map();for(const n of ir?.nets||[])for(const e of n.endpoints)m.set(key(e.ref,e.pin),n);return m;}
+function endpointDetail(ir,ep){const c=ir.components.find(x=>x.ref===ep.ref),p=c?.pins.find(x=>String(x.number)===String(ep.pin));return{comp:c,pin:p};}
 
-async function imageToPdf(file) {
-  const buf = await file.arrayBuffer();
-  const pdf = await PDFDocument.create();
-  const image = (/png/i.test(file.type) || /\.png$/i.test(file.name)) ? await pdf.embedPng(buf) : await pdf.embedJpg(buf);
-  const portrait = image.height >= image.width;
-  const pageSize = portrait ? [595.28, 841.89] : [841.89, 595.28];
-  const [pw, ph] = pageSize; const margin = 12;
-  const scale = Math.min((pw-margin*2)/image.width, (ph-margin*2)/image.height);
-  const w=image.width*scale, h=image.height*scale;
-  const page=pdf.addPage(pageSize); page.drawImage(image,{x:(pw-w)/2,y:(ph-h)/2,width:w,height:h});
-  const bytes=await pdf.save({useObjectStreams:true});
-  return new File([bytes], `${file.name.replace(/\.[^.]+$/,'') || 'schematic'}.pdf`, {type:'application/pdf'});
-}
+export default function SchematicConverter(){
+ const loc=useMemo(locale,[]),t=copy[loc], [url,setUrl]=useState(''),[file,setFile]=useState(null),[busy,setBusy]=useState(false),[rebuilding,setRebuilding]=useState(false),[error,setError]=useState(''),[result,setResult]=useState(null),[selected,setSelected]=useState(0),[tab,setTab]=useState('map'),[netQuery,setNetQuery]=useState(''),[selectedNetId,setSelectedNetId]=useState('');
+ const run=async(targetFile=file)=>{setError('');setBusy(true);setResult(null);try{let payload;if(targetFile){let f=targetFile;if(!(f.type==='application/pdf'||/\.pdf$/i.test(f.name))){if(/image\/(png|jpeg)/i.test(f.type)||/\.(png|jpe?g)$/i.test(f.name))f=await imageToPdf(f);else throw new Error(t.badFile);}if(f.size>3*1024*1024)throw new Error(t.fileLarge);payload={pdfBase64:toBase64(await f.arrayBuffer()),fileName:f.name};}else if(url.trim())payload={pdfUrl:url.trim()};else throw new Error(t.noInput);const r=await apiSchematicConvert(payload);setResult(r);setSelected(0);setSelectedNetId(r.ir?.nets?.[0]?.id||'');setTab('map');window.dispatchEvent(new Event('ds2k:usage-changed'));}catch(e){setError(e.message);if(e?.payload?.signupUrl)setError(`${e.message} ${e.payload.signupUrl}`);}finally{setBusy(false);}};
+ const setComponent=(idx,patch)=>setResult(r=>{const old=r.ir.components[idx];if(!old)return r;const next={...old,...patch},oldRef=old.ref,nextRef=next.ref,components=r.ir.components.map((c,i)=>i===idx?next:c),nets=oldRef!==nextRef?r.ir.nets.map(n=>({...n,endpoints:n.endpoints.map(e=>e.ref===oldRef?{...e,ref:nextRef}:e)})):r.ir.nets,noConnects=oldRef!==nextRef?(r.ir.noConnects||[]).map(x=>x.ref===oldRef?{...x,ref:nextRef}:x):(r.ir.noConnects||[]);return{...r,ir:{...r.ir,components,nets,noConnects}};});
+ const setPin=(ci,pi,patch)=>setResult(r=>{const comp=r.ir.components[ci],old=comp?.pins?.[pi];if(!comp||!old)return r;const next={...old,...patch},oldPin=old.number,nextPin=next.number,components=r.ir.components.map((c,i)=>i===ci?{...c,pins:c.pins.map((p,j)=>j===pi?next:p)}:c),nets=oldPin!==nextPin?r.ir.nets.map(n=>({...n,endpoints:n.endpoints.map(e=>e.ref===comp.ref&&String(e.pin)===String(oldPin)?{...e,pin:nextPin}:e)})):r.ir.nets,noConnects=oldPin!==nextPin?(r.ir.noConnects||[]).map(x=>x.ref===comp.ref&&String(x.pin)===String(oldPin)?{...x,pin:nextPin}:x):(r.ir.noConnects||[]);return{...r,ir:{...r.ir,components,nets,noConnects}};});
+ const rebuild=async()=>{if(!result?.ir)return;setRebuilding(true);setError('');try{const r=await apiSchematicBuild(result.ir);setResult(old=>({...old,...r}));}catch(e){setError(e.message);}finally{setRebuilding(false);}};
+ const ir=result?.ir,idx=useMemo(()=>pinNetIndex(ir),[ir]),sel=ir?.components?.[Math.min(selected,(ir?.components?.length||1)-1)],modern=result?.files?.find(x=>x.path.endsWith('.kicad_sch')),irFile=result?.files?.find(x=>x.path==='connectivity-ir.json')||result?.files?.find(x=>x.path==='schematic-ir.json');
+ const filteredNets=(ir?.nets||[]).filter(n=>{const q=netQuery.trim().toLowerCase();return !q||n.name.toLowerCase().includes(q)||n.endpoints.some(e=>`${e.ref}.${e.pin}`.toLowerCase().includes(q));});
+ const selectedNet=(ir?.nets||[]).find(n=>n.id===selectedNetId)||filteredNets[0]||ir?.nets?.[0];
+ const downloadZip=async()=>{if(!result?.files)return;const z=new JSZip();result.files.forEach(x=>z.file(x.path,x.content));const blob=await z.generateAsync({type:'blob'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='connectivity-intelligence-project.zip';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
+ return <div className="schematic-app">
+  <header className="schematic-head"><div><h1>{t.title}</h1><p>{t.sub}</p></div><a className="mode-link" href={modeHref('library')}>← {t.back}</a></header>
+  <section className="card schematic-input-card"><label>{t.url}</label><div className="schematic-url-row"><input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://.../schematic.pdf" onKeyDown={e=>e.key==='Enter'&&!busy&&run(null)}/><button className="btn-primary" onClick={()=>run(null)} disabled={busy}>{busy?t.converting:t.start}</button></div><div className="upload-row"><label className="btn-secondary upload-btn">📄 {t.upload}<input type="file" accept="application/pdf,.pdf,image/png,image/jpeg,.png,.jpg,.jpeg" hidden onChange={async e=>{const f=e.target.files?.[0];e.target.value='';if(f){setFile(f);await run(f);}}}/></label>{file&&<span className="src-badge src-parser">{file.name}</span>}</div>{error&&<p className="error-line">✕ {error}</p>}<p className="hint">{t.note}</p></section>
+  {!result&&<section className="card schematic-empty">{t.noResult}</section>}
+  {result&&<>
+   <section className="schematic-metrics connectivity-metrics"><div><b>{result.summary?.components||0}</b><span>{t.components}</span></div><div><b>{result.summary?.nets||0}</b><span>{t.nets}</span></div><div><b>{result.summary?.healthScore??0}</b><span>{t.health} / 100</span></div><div className={(result.summary?.errors||0)>0?'metric-danger':''}><b>{result.summary?.issues||0}</b><span>{t.issues}</span></div><div><b>{Math.round((result.summary?.confidence||0)*100)}%</b><span>{t.confidence}</span></div></section>
+   <nav className="connectivity-tabs"><button className={tab==='map'?'active':''} onClick={()=>setTab('map')}>{t.map}</button><button className={tab==='components'?'active':''} onClick={()=>setTab('components')}>{t.components}</button><button className={tab==='interfaces'?'active':''} onClick={()=>setTab('interfaces')}>{t.interfaces}</button><button className={tab==='issues'?'active':''} onClick={()=>setTab('issues')}>{t.issues}</button><button className={tab==='traditional'?'active':''} onClick={()=>setTab('traditional')}>{t.traditional}</button></nav>
 
-function toBase64(buf) {
-  const bytes = new Uint8Array(buf); let bin='';
-  for (let i=0;i<bytes.length;i+=0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i,i+0x8000));
-  return btoa(bin);
-}
-function saveText(name, content, type='text/plain') {
-  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([content],{type})); a.download=name; a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-}
-function modeHref(mode) {
-  const p=new URLSearchParams(location.search); p.set('mode',mode); return `${location.pathname}?${p.toString()}`;
-}
+   {tab==='map'&&<section className="card connectivity-map"><div className="net-browser"><input className="net-search" placeholder={t.searchNet} value={netQuery} onChange={e=>setNetQuery(e.target.value)}/><div className="net-list">{filteredNets.map(n=><button key={n.id} className={selectedNet?.id===n.id?'active':''} onClick={()=>setSelectedNetId(n.id)}><span>{n.name}</span><small>{n.endpoints.length} pins · {Math.round((n.confidence||0)*100)}%</small></button>)}</div></div><div className="net-focus">{selectedNet?<><div className="net-hub"><strong>{selectedNet.name}</strong><span>{selectedNet.endpoints.length} endpoints</span></div><div className="endpoint-grid">{selectedNet.endpoints.map((ep,i)=>{const d=endpointDetail(ir,ep);return <div className="endpoint-card" key={`${ep.ref}-${ep.pin}-${i}`}><b>{ep.ref}.{ep.pin}</b><span>{d.pin?.name||'?'}</span><small>{d.comp?.value||''} · {d.pin?.type||'unspecified'}</small></div>;})}</div>{selectedNet.evidence&&<div className="net-evidence"><b>{t.evidence}:</b> {selectedNet.evidence}</div>}</>:<div className="empty-detail">{t.selectNet}</div>}</div></section>}
 
-export default function SchematicConverter() {
-  const loc=useMemo(locale,[]); const t=copy[loc];
-  const [url,setUrl]=useState(''); const [file,setFile]=useState(null); const [busy,setBusy]=useState(false); const [rebuilding,setRebuilding]=useState(false);
-  const [error,setError]=useState(''); const [result,setResult]=useState(null); const [selected,setSelected]=useState(0);
+   {tab==='components'&&<section className="card component-centric"><div className="component-sidebar">{ir.components.map((c,i)=><button key={c.id||c.ref} className={i===selected?'active':''} onClick={()=>setSelected(i)}><b>{c.ref}</b><span>{c.value}</span><small>{c.pins.length} pins</small></button>)}</div><div className="component-detail">{sel&&<><div className="component-edit-grid"><label>{t.ref}<input value={sel.ref} onChange={e=>setComponent(selected,{ref:e.target.value})}/></label><label>{t.value}<input value={sel.value} onChange={e=>setComponent(selected,{value:e.target.value})}/></label><label>{t.library}<input value={sel.libraryId||''} onChange={e=>setComponent(selected,{libraryId:e.target.value})}/></label><label>{t.footprint}<input value={sel.footprint||''} onChange={e=>setComponent(selected,{footprint:e.target.value})}/></label></div><div className="schematic-table-wrap"><table className="schematic-table pin-connectivity-table"><thead><tr><th>{t.number}</th><th>{t.name}</th><th>{t.type}</th><th>{t.net}</th><th>{t.peer}</th><th>{t.confidence}</th></tr></thead><tbody>{sel.pins.map((p,pi)=>{const n=idx.get(key(sel.ref,p.number)),peers=n?.endpoints.filter(e=>!(e.ref===sel.ref&&String(e.pin)===String(p.number)))||[];return <tr key={`${p.number}-${pi}`}><td><input value={p.number} onChange={e=>setPin(selected,pi,{number:e.target.value})}/></td><td><input value={p.name} onChange={e=>setPin(selected,pi,{name:e.target.value})}/></td><td><select value={p.type} onChange={e=>setPin(selected,pi,{type:e.target.value})}>{PIN_TYPES.map(x=><option key={x}>{x}</option>)}</select></td><td>{n?<button className="link-button" onClick={()=>{setSelectedNetId(n.id);setTab('map');}}>{n.name}</button>:<span className="unconnected">—</span>}</td><td>{peers.map(e=>`${e.ref}.${e.pin}`).join(', ')||'—'}</td><td>{Math.round((p.confidence||0)*100)}%</td></tr>;})}</tbody></table></div><details className="advanced-pin-layout"><summary>Symbol layout metadata</summary><table className="schematic-table"><tbody>{sel.pins.map((p,pi)=><tr key={pi}><td>{p.number} {p.name}</td><td><select value={p.side} onChange={e=>setPin(selected,pi,{side:e.target.value})}>{SIDES.map(x=><option key={x}>{x}</option>)}</select></td></tr>)}</tbody></table></details><button className="btn-primary schematic-rebuild" onClick={rebuild} disabled={rebuilding}>{rebuilding?t.rebuilding:t.rebuild}</button></>}</div></section>}
 
-  const run = async (targetFile=file) => {
-    setError(''); setBusy(true); setResult(null);
-    try {
-      let payload;
-      if (targetFile) {
-        let f=targetFile;
-        if (!(f.type==='application/pdf'||/\.pdf$/i.test(f.name))) {
-          if (/image\/(png|jpeg)/i.test(f.type)||/\.(png|jpe?g)$/i.test(f.name)) f=await imageToPdf(f); else throw new Error(t.badFile);
-        }
-        if (f.size>3*1024*1024) throw new Error(t.fileLarge);
-        payload={pdfBase64:toBase64(await f.arrayBuffer()),fileName:f.name};
-      } else if (url.trim()) payload={pdfUrl:url.trim()};
-      else throw new Error(t.noInput);
-      const r=await apiSchematicConvert(payload); setResult(r); setSelected(0);
-      window.dispatchEvent(new Event('ds2k:usage-changed'));
-    } catch(e) {
-      setError(e.message);
-      if(e?.payload?.signupUrl) setError(`${e.message} ${e.payload.signupUrl}`);
-    } finally { setBusy(false); }
-  };
+   {tab==='interfaces'&&<section className="card"><h2>{t.interfaces}</h2><div className="interface-grid">{(ir.interfaces||[]).map(x=><article className={`interface-card ${x.complete?.ok?'ok':'warn'}`} key={x.id}><header><b>{x.type}</b><span>{x.complete?.ok?'✓ '+t.complete:`⚠ ${t.missing}: ${x.complete?.missing?.join(', ')}`}</span></header><p>{x.members.join(' ↔ ')}</p><ul>{x.nets.map(n=><li key={n.name}><strong>{n.role}</strong><button className="link-button" onClick={()=>{const net=ir.nets.find(a=>a.name===n.name);if(net)setSelectedNetId(net.id);setTab('map');}}>{n.name}</button><span>{n.endpoints.map(e=>`${e.ref}.${e.pin}`).join(' · ')}</span></li>)}</ul></article>)}{!(ir.interfaces||[]).length&&<p className="hint">No common digital interfaces were identified.</p>}</div><h2 className="power-title">{t.power}</h2><div className="rail-grid">{(ir.powerRails||[]).map(r=><article className="rail-card" key={r.id}><header><b>{r.name}</b><span>{r.ground?'GND':'Power'}</span></header><div><strong>Sources</strong> {r.sources.map(x=>`${x.ref}.${x.pin}`).join(', ')||r.connectors.map(x=>`${x.ref}.${x.pin}`).join(', ')||'—'}</div><div><strong>Loads</strong> {r.loads.map(x=>`${x.ref}.${x.pin}`).join(', ')||'—'}</div><small>{r.endpoints.length} endpoints · {Math.round((r.confidence||0)*100)}%</small></article>)}</div></section>}
 
-  // Ref/pin identity participates in the net graph. Edits must atomically rewrite endpoints and NC markers,
-  // otherwise a visually correct review would silently disconnect the generated schematic.
-  const setComponent=(idx,patch)=>setResult((r)=>{
-    const old=r.ir.components[idx]; if(!old)return r;
-    const next={...old,...patch}; const oldRef=old.ref; const nextRef=next.ref;
-    const components=r.ir.components.map((c,i)=>i===idx?next:c);
-    const nets=oldRef!==nextRef?r.ir.nets.map((n)=>({...n,endpoints:n.endpoints.map((e)=>e.ref===oldRef?{...e,ref:nextRef}:e)})):r.ir.nets;
-    const noConnects=oldRef!==nextRef?(r.ir.noConnects||[]).map((x)=>x.ref===oldRef?{...x,ref:nextRef}:x):(r.ir.noConnects||[]);
-    return {...r,ir:{...r.ir,components,nets,noConnects}};
-  });
-  const setPin=(ci,pi,patch)=>setResult((r)=>{
-    const comp=r.ir.components[ci]; const old=comp?.pins?.[pi]; if(!comp||!old)return r;
-    const next={...old,...patch}; const oldPin=old.number; const nextPin=next.number;
-    const components=r.ir.components.map((c,i)=>i===ci?{...c,pins:c.pins.map((p,j)=>j===pi?next:p)}:c);
-    const nets=oldPin!==nextPin?r.ir.nets.map((n)=>({...n,endpoints:n.endpoints.map((e)=>e.ref===comp.ref&&String(e.pin)===String(oldPin)?{...e,pin:nextPin}:e)})):r.ir.nets;
-    const noConnects=oldPin!==nextPin?(r.ir.noConnects||[]).map((x)=>x.ref===comp.ref&&String(x.pin)===String(oldPin)?{...x,pin:nextPin}:x):(r.ir.noConnects||[]);
-    return {...r,ir:{...r.ir,components,nets,noConnects}};
-  });
-  const rebuild=async()=>{ if(!result?.ir)return; setRebuilding(true);setError('');try{const r=await apiSchematicBuild(result.ir);setResult((old)=>({...old,...r}));}catch(e){setError(e.message);}finally{setRebuilding(false);}};
+   {tab==='issues'&&<section className="card"><div className="erc-head"><div><h2>{t.issues}</h2><p>Deterministic Graph ERC · 0 model tokens</p></div><div className="erc-summary"><span className="sev-error">{ir.health?.error||0} {t.severity.error}</span><span className="sev-warning">{ir.health?.warning||0} {t.severity.warning}</span><span className="sev-review">{ir.health?.review||0} {t.severity.review}</span></div></div>{(ir.issues||[]).length?<div className="issue-list">{ir.issues.map(x=><article className={`issue ${x.severity}`} key={x.id}><div className="issue-badge">{t.severity[x.severity]||x.severity}</div><div><b>{x.title}</b><p>{x.detail}</p><small>{x.code}{x.refs?.length?` · ${x.refs.join(', ')}`:''}{x.nets?.length?` · ${x.nets.join(', ')}`:''}</small></div></article>)}</div>:<div className="erc-pass">✓ {t.allGood}</div>}</section>}
 
-  const modern=result?.files?.find((x)=>x.path.endsWith('.kicad_sch'));
-  const irFile=result?.files?.find((x)=>x.path==='schematic-ir.json');
-  const downloadZip=async()=>{if(!result?.files)return;const z=new JSZip();result.files.forEach((x)=>z.file(x.path,x.content));const blob=await z.generateAsync({type:'blob'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='ds2kicad-reconstructed-schematic.zip';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
-  const sel=result?.ir?.components?.[Math.min(selected,(result?.ir?.components?.length||1)-1)];
-
-  return <div className="schematic-app">
-    <header className="schematic-head">
-      <div><h1>{t.title}</h1><p>{t.sub}</p></div>
-      <a className="mode-link" href={modeHref('library')}>← {t.back}</a>
-    </header>
-
-    <section className="card schematic-input-card">
-      <label>{t.url}</label>
-      <div className="schematic-url-row"><input value={url} onChange={(e)=>setUrl(e.target.value)} placeholder="https://.../schematic.pdf" onKeyDown={(e)=>e.key==='Enter'&&!busy&&run(null)}/><button className="btn-primary" onClick={()=>run(null)} disabled={busy}>{busy?t.converting:t.start}</button></div>
-      <div className="upload-row">
-        <label className="btn-secondary upload-btn">📄 {t.upload}<input type="file" accept="application/pdf,.pdf,image/png,image/jpeg,.png,.jpg,.jpeg" hidden onChange={async(e)=>{const f=e.target.files?.[0];e.target.value='';if(f){setFile(f);await run(f);}}}/></label>
-        {file&&<span className="src-badge src-parser">{file.name}</span>}
-      </div>
-      {error&&<p className="error-line">✕ {error}</p>}
-      <p className="hint">{t.note}</p>
-    </section>
-
-    {!result&&<section className="card schematic-empty">{t.noResult}</section>}
-    {result&&<>
-      <section className="schematic-metrics">
-        <div><b>{result.summary?.components||0}</b><span>{t.components}</span></div><div><b>{result.summary?.nets||0}</b><span>{t.nets}</span></div><div><b>{Math.round((result.summary?.confidence||0)*100)}%</b><span>{t.confidence}</span></div><div><b>{result.summary?.warnings||0}</b><span>{t.warnings}</span></div>
-      </section>
-      <section className="card"><h2>{t.preview}</h2><div className="schematic-preview" dangerouslySetInnerHTML={{__html:result.previewSvg||''}}/></section>
-      <section className="card"><h2>{t.edit}</h2>
-        <div className="schematic-table-wrap"><table className="schematic-table"><thead><tr><th>{t.ref}</th><th>{t.value}</th><th>{t.library}</th><th>{t.footprint}</th><th>{t.pins}</th><th>{t.confidence}</th></tr></thead><tbody>{result.ir.components.map((c,i)=><tr key={c.id||c.ref} className={i===selected?'selected':''} onClick={()=>setSelected(i)}><td><input value={c.ref} onChange={(e)=>setComponent(i,{ref:e.target.value})}/></td><td><input value={c.value} onChange={(e)=>setComponent(i,{value:e.target.value})}/></td><td><input value={c.libraryId||''} onChange={(e)=>setComponent(i,{libraryId:e.target.value})}/></td><td><input value={c.footprint||''} onChange={(e)=>setComponent(i,{footprint:e.target.value})}/></td><td>{c.pins.length}</td><td>{Math.round((c.confidence||0)*100)}%</td></tr>)}</tbody></table></div>
-        {sel&&<div className="pin-edit"><h3>{t.select}: {sel.ref}</h3><table className="schematic-table pin-edit-table"><thead><tr><th>{t.number}</th><th>{t.name}</th><th>{t.type}</th><th>{t.side}</th><th>{t.confidence}</th></tr></thead><tbody>{sel.pins.map((p,pi)=><tr key={`${p.number}-${pi}`}><td><input value={p.number} onChange={(e)=>setPin(selected,pi,{number:e.target.value})}/></td><td><input value={p.name} onChange={(e)=>setPin(selected,pi,{name:e.target.value})}/></td><td><select value={p.type} onChange={(e)=>setPin(selected,pi,{type:e.target.value})}>{PIN_TYPES.map(x=><option key={x}>{x}</option>)}</select></td><td><select value={p.side} onChange={(e)=>setPin(selected,pi,{side:e.target.value})}>{SIDES.map(x=><option key={x}>{x}</option>)}</select></td><td>{Math.round((p.confidence||0)*100)}%</td></tr>)}</tbody></table></div>}
-        <button className="btn-primary schematic-rebuild" onClick={rebuild} disabled={rebuilding}>{rebuilding?t.rebuilding:t.rebuild}</button>
-      </section>
-      <section className="card"><h2>{t.nets}</h2><div className="schematic-table-wrap"><table className="schematic-table"><thead><tr><th>{t.net}</th><th>{t.endpoints}</th><th>{t.confidence}</th><th>{t.evidence}</th></tr></thead><tbody>{result.ir.nets.map((n)=><tr key={n.id||n.name}><td>{n.name}</td><td>{n.endpoints.map(e=>`${e.ref}.${e.pin}`).join(' ↔ ')}</td><td>{Math.round((n.confidence||0)*100)}%</td><td>{n.evidence||''}</td></tr>)}</tbody></table></div>
-        {!!result.ir.warnings?.length&&<div className="schematic-warnings"><b>{t.warnings}</b><ul>{result.ir.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul></div>}
-      </section>
-      <section className="card schematic-downloads"><button className="btn-primary" disabled={!modern} onClick={()=>modern&&saveText(modern.path,modern.content)}>{t.download}</button><button className="btn-secondary" onClick={downloadZip}>{t.zip}</button><button className="btn-secondary" disabled={!irFile} onClick={()=>irFile&&saveText(irFile.path,irFile.content,'application/json')}>{t.ir}</button></section>
-    </>}
-  </div>;
+   {tab==='traditional'&&<><section className="card"><div className="traditional-head"><div><h2>{t.traditional}</h2><p>{t.rendererNote}</p></div><button className="btn-secondary" onClick={rebuild} disabled={rebuilding}>{rebuilding?t.rebuilding:t.rebuild}</button></div><div className="schematic-preview" dangerouslySetInnerHTML={{__html:result.previewSvg||''}}/></section><section className="card schematic-downloads"><button className="btn-primary" disabled={!modern} onClick={()=>modern&&saveText(modern.path,modern.content)}>{t.download}</button><button className="btn-secondary" onClick={downloadZip}>{t.zip}</button><button className="btn-secondary" disabled={!irFile} onClick={()=>irFile&&saveText('connectivity-ir.json',JSON.stringify(ir,null,2),'application/json')}>{t.ir}</button></section></>}
+  </>}
+ </div>;
 }
