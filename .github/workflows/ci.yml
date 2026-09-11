@@ -1,0 +1,23 @@
+name: CI
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      VITE_EZPLM_ORIGINS: https://www.ezplm.cn,https://www.eehub.io
+      AUTH_MODE: dev
+      PDF_TOKEN_SECRET: ci-pdf-token-secret
+      ASSET_TOKEN_SECRET: ci-asset-token-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
