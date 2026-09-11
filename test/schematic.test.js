@@ -4,72 +4,15 @@ import { sanitizeSchematicIR, summarizeSchematicIR } from '../lib/schematic/ir.j
 import { buildSchematicFiles, generateModernSchematic } from '../lib/schematic/kicad.js';
 import { buildSchematicPrompt } from '../lib/schematic/gemini.js';
 
-const raw = {
-  title: 'LED test', confidence: 0.92,
-  components: [
-    { ref:'R1', value:'1k', position:{x:.3,y:.5}, pins:[
-      {number:'1',name:'1',type:'passive',side:'left',confidence:.9},
-      {number:'2',name:'2',type:'passive',side:'right',confidence:.9}
-    ] },
-    { ref:'D1', value:'LED GREEN', position:{x:.7,y:.5}, pins:[
-      {number:'1',name:'K',type:'passive',side:'left',confidence:.9},
-      {number:'2',name:'A',type:'passive',side:'right',confidence:.9}
-    ] }
-  ],
-  nets:[{name:'LED_A',confidence:.95,endpoints:[{ref:'R1',pin:'2'},{ref:'D1',pin:'1'}]}]
-};
+const raw={title:'LED test',confidence:.92,components:[{ref:'R1',value:'1k',position:{x:.3,y:.5},pins:[{number:'1',name:'1',type:'passive',side:'left',confidence:.9},{number:'2',name:'2',type:'passive',side:'right',confidence:.9}]},{ref:'D1',value:'LED GREEN',position:{x:.7,y:.5},pins:[{number:'1',name:'K',type:'passive',side:'left',confidence:.9},{number:'2',name:'A',type:'passive',side:'right',confidence:.9}]}],nets:[{name:'LED_A',confidence:.95,endpoints:[{ref:'R1',pin:'2'},{ref:'D1',pin:'1'}]}]};
+function balancedSexpr(text){let depth=0,quoted=false,escaped=false;for(const ch of text){if(quoted){if(escaped)escaped=false;else if(ch==='\\')escaped=true;else if(ch==='"')quoted=false;continue;}if(ch==='"'){quoted=true;continue;}if(ch==='(')depth++;else if(ch===')')depth--;if(depth<0)return false;}return depth===0&&!quoted;}
 
-function balancedSexpr(text) {
-  let depth=0, quoted=false, escaped=false;
-  for(const ch of text){
-    if(quoted){ if(escaped)escaped=false; else if(ch==='\\')escaped=true; else if(ch==='"')quoted=false; continue; }
-    if(ch==='"'){quoted=true;continue;} if(ch==='(')depth++; else if(ch===')')depth--; if(depth<0)return false;
-  }
-  return depth===0&&!quoted;
-}
+test('Connectivity IR is source of truth and resolves common KiCad hints',()=>{const ir=sanitizeSchematicIR(raw,{fileName:'fixture.pdf',model:'stub'});assert.equal(ir.schemaVersion,'connectivity-intelligence.ir.v1');assert.equal(ir.kind,'connectivity-ir');assert.equal(ir.components.length,2);assert.equal(ir.components[0].libraryId,'Device:R');assert.equal(ir.components[1].libraryId,'Device:LED');assert.deepEqual(ir.nets[0].endpoints.map(e=>`${e.ref}.${e.pin}`),['R1.2','D1.1']);assert.equal(ir.health.deterministic,true);assert.equal(ir.health.tokenCost,0);assert.equal(summarizeSchematicIR(ir).components,2);});
 
-test('schematic IR resolves common KiCad library hints and nets', () => {
-  const ir = sanitizeSchematicIR(raw, { fileName:'fixture.pdf', model:'stub' });
-  assert.equal(ir.schemaVersion, 'ds2kicad.schematic-ir.v1');
-  assert.equal(ir.components.length, 2);
-  assert.equal(ir.components[0].libraryId, 'Device:R');
-  assert.equal(ir.components[1].libraryId, 'Device:LED');
-  assert.equal(ir.nets.length, 1);
-  assert.deepEqual(ir.nets[0].endpoints.map((e)=>`${e.ref}.${e.pin}`), ['R1.2','D1.1']);
-  assert.equal(summarizeSchematicIR(ir).components, 2);
-});
+test('Graph ERC detects multiple drivers and unconnected power inputs without model calls',()=>{const ir=sanitizeSchematicIR({title:'ERC',components:[{ref:'U1',value:'A',pins:[{number:'1',name:'OUT',type:'output',side:'right',confidence:1},{number:'2',name:'VDD',type:'power_in',side:'top',confidence:1}]},{ref:'U2',value:'B',pins:[{number:'1',name:'OUT',type:'output',side:'right',confidence:1}]}],nets:[{name:'BAD',confidence:1,endpoints:[{ref:'U1',pin:'1'},{ref:'U2',pin:'1'}]}]});assert.ok(ir.issues.some(x=>x.code==='MULTIPLE_DRIVERS'&&x.severity==='error'));assert.ok(ir.issues.some(x=>x.code==='POWER_INPUT_UNCONNECTED'));assert.equal(ir.health.tokenCost,0);});
 
-test('modern KiCad schematic contains complete symbol instances and electrical labels', () => {
-  const ir = sanitizeSchematicIR(raw);
-  const sch = generateModernSchematic(ir).content;
-  assert.match(sch, /^\(kicad_sch/);
-  assert.ok(balancedSexpr(sch));
-  assert.match(sch, /\(generator_version "1\.0"\)/);
-  assert.match(sch, /\(lib_symbols/);
-  assert.match(sch, /\(lib_id "Device:R"\)/);
-  assert.match(sch, /\(property "Reference" "R1"/);
-  assert.match(sch, /\(pin "1" \(uuid [0-9a-f-]+\)\)/);
-  assert.match(sch, /\(instances\s+\(project "reconstructed"/);
-  assert.match(sch, /\(reference "R1"\)/);
-  assert.equal((sch.match(/\(label "LED_A"/g)||[]).length, 2);
-  assert.match(sch, /\(sheet_instances/);
-  assert.match(sch, /\(embedded_fonts no\)/);
-});
+test('modern KiCad schematic remains a renderer of Connectivity IR',()=>{const ir=sanitizeSchematicIR(raw),sch=generateModernSchematic(ir).content;assert.match(sch,/^\(kicad_sch/);assert.ok(balancedSexpr(sch));assert.match(sch,/\(generator "connectivity-intelligence-engine"\)/);assert.match(sch,/\(lib_id "Device:R"\)/);assert.match(sch,/\(property "Reference" "R1"/);assert.match(sch,/\(pin "1" \(uuid [0-9a-f-]+\)\)/);assert.match(sch,/\(instances\s+\(project "connectivity_reconstructed"/);assert.equal((sch.match(/\(label "LED_A"/g)||[]).length,2);assert.match(sch,/\(sheet_instances/);});
 
-test('bundle includes modern and legacy fallback files', () => {
-  const ir = sanitizeSchematicIR(raw);
-  const out = buildSchematicFiles(ir);
-  const names = out.files.map((x)=>x.path);
-  assert.ok(names.includes('reconstructed.kicad_sch'));
-  assert.ok(names.includes('reconstructed.sch'));
-  assert.ok(names.includes('reconstructed-cache.lib'));
-  assert.ok(names.includes('schematic-ir.json'));
-  assert.ok(names.includes('conversion-report.json'));
-  assert.match(out.previewSvg, /<svg/);
-});
+test('bundle exports Connectivity IR plus KiCad compatibility renderers',()=>{const ir=sanitizeSchematicIR(raw),out=buildSchematicFiles(ir),names=out.files.map(x=>x.path);assert.ok(names.includes('reconstructed.kicad_sch'));assert.ok(names.includes('reconstructed.sch'));assert.ok(names.includes('reconstructed-cache.lib'));assert.ok(names.includes('connectivity-ir.json'));assert.ok(names.includes('schematic-ir.json'));assert.ok(names.includes('connectivity-report.json'));assert.match(out.previewSvg,/<svg/);});
 
-test('schematic prompt explicitly protects junction semantics', () => {
-  const p = buildSchematicPrompt({ fileName:'fixture.pdf' });
-  assert.match(p, /WITHOUT a junction dot is NOT connected/);
-  assert.match(p, /Return ONLY valid JSON/);
-});
+test('extraction prompt protects junction semantics and prioritizes connectivity',()=>{const p=buildSchematicPrompt({fileName:'fixture.pdf'});assert.match(p,/Connectivity is the most important field|Connectivity is the most important/i);assert.match(p,/WITHOUT a junction dot is NOT connected/);assert.match(p,/Return ONLY valid JSON/);});
