@@ -1,0 +1,1 @@
+Protocol ERC findings reuse the existing ERC / Issues view. No separate AI call is required; the UI receives protocol-layer issues from Connectivity IR and displays them together with graph and power findings.
