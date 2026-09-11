@@ -1,0 +1,33 @@
+{
+  "name": "MikroE Multimeter Click schematic v102",
+  "purpose": "Golden schematic for Connectivity Intelligence Engine regression",
+  "source": "multimeter-click-schematic-v102.pdf",
+  "expectations": {
+    "minimumReferenceDesignators": 75,
+    "requiredReferences": [
+      "U1", "U2", "U3", "U4", "U5", "IC1",
+      "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7",
+      "OP1A", "OP1B", "OP2A", "OP2B", "OP3A", "OP3B", "OP3C", "OP3D",
+      "R1", "R10", "R20", "R30", "R40", "C1", "C10", "C18"
+    ],
+    "requiredNamedNets": ["VCC", "GND", "VGND", "VREF", "CS", "SCK", "MOSI", "MISO"],
+    "knownParts": {
+      "U2": "ADM8829",
+      "U3": "MCP3204",
+      "U4": "NE555",
+      "IC1": "MAX6106"
+    },
+    "knownPinMaps": {
+      "ADM8829": {"1":"OUT", "2":"IN", "3":"CAP-", "4":"GND", "5":"NC", "6":"CAP+"},
+      "MCP3204": {"1":"CH0", "2":"CH1", "3":"CH2", "4":"CH3", "5":"NC", "6":"NC", "7":"DGND", "8":"CS/SHDN", "9":"DIN", "10":"DOUT", "11":"CLK", "12":"AGND", "13":"VREF", "14":"VDD"},
+      "NE555": {"1":"GND", "2":"TRIG", "3":"OUT", "4":"RST", "5":"CON", "6":"THR", "7":"DIS", "8":"VCC"},
+      "MAX6106": {"1":"IN", "2":"OUT", "3":"GND"}
+    }
+  },
+  "releaseTargets": {
+    "referenceRecall": 0.95,
+    "namedNetRecall": 0.95,
+    "knownPinMapAccuracy": 1.0,
+    "endpointAccuracyTarget": 0.98
+  }
+}
