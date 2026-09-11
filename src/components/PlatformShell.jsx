@@ -24,6 +24,13 @@ function detectLocale(channel) {
   return /^zh/i.test(navigator.language || '') ? 'zh-CN' : 'en-US';
 }
 
+function currentMode() {
+  return (new URLSearchParams(location.search).get('mode') || 'library').toLowerCase() === 'schematic' ? 'schematic' : 'library';
+}
+function modeHref(mode) {
+  const p = new URLSearchParams(location.search); p.set('mode', mode); return `${location.pathname}?${p.toString()}`;
+}
+
 async function imageFileToPdf(file) {
   const buf = await file.arrayBuffer();
   const pdf = await PDFDocument.create();
@@ -62,7 +69,8 @@ const copy = {
     exhausted: '免费体验已用完，注册后可保存个人库并继续生成。',
     converting: '正在把图片转换为 PDF…',
     badType: '目前支持 PDF、PNG、JPG/JPEG 图片。',
-    tooLarge: '文件转换后超过 3MB，请压缩图片或改用 PDF URL。'
+    tooLarge: '文件转换后超过 3MB，请压缩图片或改用 PDF URL。',
+    library: '元器件库生成', schematic: '原理图转换'
   },
   'en-US': {
     guest: 'Free trial', registered: 'Member', direct: 'Direct',
@@ -71,13 +79,15 @@ const copy = {
     exhausted: 'Your free trial is used up. Sign up to save your library and keep generating.',
     converting: 'Converting image to PDF…',
     badType: 'PDF, PNG and JPG/JPEG are supported in this MVP.',
-    tooLarge: 'The converted file is over 3MB. Compress the image or use a PDF URL.'
+    tooLarge: 'The converted file is over 3MB. Compress the image or use a PDF URL.',
+    library: 'Library generator', schematic: 'Schematic converter'
   }
 };
 
 export default function PlatformShell({ children }) {
   const channel = useMemo(detectChannel, []);
   const locale = useMemo(() => detectLocale(channel), [channel]);
+  const mode = useMemo(currentMode, []);
   const t = copy[locale] || copy['en-US'];
   const [platform, setPlatform] = useState(null);
   const [error, setError] = useState('');
@@ -86,17 +96,9 @@ export default function PlatformShell({ children }) {
 
   const refresh = useCallback(async () => {
     try {
-      const data = await apiPlatformSession({
-        channel,
-        locale,
-        landing: location.href,
-        referrer: document.referrer || ''
-      });
-      setPlatform(data);
-      setError('');
-    } catch (e) {
-      setError(e.message);
-    }
+      const data = await apiPlatformSession({ channel, locale, landing: location.href, referrer: document.referrer || '' });
+      setPlatform(data); setError('');
+    } catch (e) { setError(e.message); }
   }, [channel, locale]);
 
   useEffect(() => {
@@ -111,33 +113,25 @@ export default function PlatformShell({ children }) {
       const r = await apiCreateHandoff({ returnTo: location.href });
       location.assign(r.url || platform?.signupUrl || '#');
     } catch (e) {
-      if (platform?.signupUrl) location.assign(platform.signupUrl);
-      else setError(e.message);
+      if (platform?.signupUrl) location.assign(platform.signupUrl); else setError(e.message);
     }
   };
 
   const onFile = async (e) => {
-    const selected = e.target.files?.[0];
-    e.target.value = '';
+    const selected = e.target.files?.[0]; e.target.value = '';
     if (!selected) return;
-    setError('');
-    setUploading(true);
+    setError(''); setUploading(true);
     try {
       let file = selected;
       if (selected.type === 'application/pdf' || /\.pdf$/i.test(selected.name)) {
         // pass through
       } else if (/image\/(png|jpeg)/i.test(selected.type) || /\.(png|jpe?g)$/i.test(selected.name)) {
         file = await imageFileToPdf(selected);
-      } else {
-        throw new Error(t.badType);
-      }
+      } else throw new Error(t.badType);
       if (file.size > 3 * 1024 * 1024) throw new Error(t.tooLarge);
       feedExistingUploader(file);
-    } catch (e2) {
-      setError(e2.message);
-    } finally {
-      setUploading(false);
-    }
+    } catch (e2) { setError(e2.message); }
+    finally { setUploading(false); }
   };
 
   const wallet = platform?.wallet;
@@ -146,31 +140,25 @@ export default function PlatformShell({ children }) {
   const brand = locale === 'zh-CN' ? 'ezPLM' : 'eeHub';
   const channelLabel = channel === 'direct' ? t.direct : channel;
 
-  return (
-    <>
-      <div className={`platform-bar ${exhausted ? 'platform-bar-warn' : ''}`}>
-        <div className="platform-left">
-          <span className="platform-brand">AI EDA Agent</span>
-          <span className="platform-channel">{channelLabel}</span>
-          {platform && (
-            <span className="platform-credit">
-              {isGuest ? t.guest : t.registered} · {t.used} <b>{wallet?.balance ?? '—'}</b> {t.unit}
-            </span>
-          )}
-        </div>
-        <div className="platform-actions">
-          <button className="platform-upload" onClick={() => inputRef.current?.click()} disabled={!platform || uploading}>
-            {uploading ? t.converting : t.upload}
-          </button>
-          <input ref={inputRef} type="file" accept="application/pdf,.pdf,image/png,image/jpeg,.png,.jpg,.jpeg" hidden onChange={onFile} />
-          <button className="platform-account" onClick={openAccount} disabled={!platform}>
-            {isGuest ? t.signup : `${t.account} · ${brand}`}
-          </button>
-        </div>
+  return <>
+    <div className={`platform-bar ${exhausted ? 'platform-bar-warn' : ''}`}>
+      <div className="platform-left">
+        <span className="platform-brand">AI EDA Agent</span>
+        <span className="platform-channel">{channelLabel}</span>
+        <nav className="platform-mode-switch" aria-label="Agent mode">
+          <a className={mode === 'library' ? 'active' : ''} href={modeHref('library')}>{t.library}</a>
+          <a className={mode === 'schematic' ? 'active' : ''} href={modeHref('schematic')}>{t.schematic}</a>
+        </nav>
+        {platform && <span className="platform-credit">{isGuest ? t.guest : t.registered} · {t.used} <b>{wallet?.balance ?? '—'}</b> {t.unit}</span>}
       </div>
-      {exhausted && <div className="platform-exhausted">{t.exhausted}</div>}
-      {error && <div className="platform-error">{error}</div>}
-      {children}
-    </>
-  );
+      <div className="platform-actions">
+        <button className="platform-upload" onClick={() => inputRef.current?.click()} disabled={!platform || uploading}>{uploading ? t.converting : t.upload}</button>
+        <input ref={inputRef} type="file" accept="application/pdf,.pdf,image/png,image/jpeg,.png,.jpg,.jpeg" hidden onChange={onFile} />
+        <button className="platform-account" onClick={openAccount} disabled={!platform}>{isGuest ? t.signup : `${t.account} · ${brand}`}</button>
+      </div>
+    </div>
+    {exhausted && <div className="platform-exhausted">{t.exhausted}</div>}
+    {error && <div className="platform-error">{error}</div>}
+    {children}
+  </>;
 }

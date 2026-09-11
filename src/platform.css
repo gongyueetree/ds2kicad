@@ -8,6 +8,10 @@
 .platform-left, .platform-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
 .platform-brand { font-weight: 750; letter-spacing: .2px; }
 .platform-channel { padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,.09); text-transform: none; }
+.platform-mode-switch { display: inline-flex; border: 1px solid rgba(255,255,255,.16); border-radius: 7px; overflow: hidden; }
+.platform-mode-switch a { color: #cbd8d4; text-decoration: none; padding: 4px 9px; background: transparent; }
+.platform-mode-switch a + a { border-left: 1px solid rgba(255,255,255,.16); }
+.platform-mode-switch a.active { color: #052d28; background: #7ce1c9; font-weight: 700; }
 .platform-credit b { color: #7ce1c9; font-size: 14px; }
 .platform-bar-warn .platform-credit b { color: #ffcf70; }
 .platform-actions button { border-radius: 7px; padding: 6px 11px; cursor: pointer; font: inherit; }
@@ -21,4 +25,6 @@
   .platform-bar { align-items: flex-start; flex-direction: column; }
   .platform-actions { width: 100%; }
   .platform-actions button { flex: 1; }
+  .platform-mode-switch { order: 5; width: 100%; }
+  .platform-mode-switch a { flex: 1; text-align: center; }
 }
