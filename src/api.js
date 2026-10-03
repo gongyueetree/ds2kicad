@@ -58,3 +58,12 @@ export async function apiLoadJob(jobId) {
 }
 export const apiFigureUpload = (payload) => post('/api/figure-upload', payload);
 export const apiLifecycle = (payload) => post('/api/lifecycle', payload);
+
+export const apiDataReview = payload => post('/api/data-assets', payload);
+export const apiBatch = payload => post('/api/batch', payload);
+export async function apiGet(path) {
+  const r = await fetch(path, { credentials:'same-origin', headers:guestHeaders() });
+  const data = await r.json().catch(()=>({}));
+  if (!r.ok) throw apiError(data.error || `请求失败 (${r.status})`,r.status,data);
+  return data;
+}

@@ -9,8 +9,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
-      port: 5173,
-      proxy: { '/api': 'http://localhost:3001' }
+      port: Number(process.env.DS2_WEB_PORT || 5173),
+      proxy: { '/api': `http://localhost:${process.env.DS2_API_PORT || 3001}` }
     },
     build: {
       outDir: 'dist',

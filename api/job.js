@@ -3,6 +3,7 @@
 import { setCors } from './extract.js';
 import { getJobStore } from '../lib/jobstore.js';
 import { authenticate, authorizeJobAccess, hasRole } from '../lib/auth.js';
+import { workflowView } from '../lib/data-assets/pipeline.js';
 import { currentState } from '../lib/lifecycle.js';
 
 export default async function handler(req, res) {
@@ -32,6 +33,7 @@ export default async function handler(req, res) {
     packages: ir.packages,
     pinsets: ir.pinsets,
     figures: ir.figures,
+    dataAssets:ir.dataAssets || null, workflow:workflowView(ir),
     recommendedPackageIndex: ir.recommendedPackageIndex ?? 0,
     pins: ir.pinsets?.[0]?.normalizedPins || [],
     mock: !!ir.mock,

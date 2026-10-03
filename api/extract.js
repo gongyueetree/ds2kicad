@@ -10,6 +10,9 @@ import { getJobStore, sha256 } from '../lib/jobstore.js';
 import { authenticate } from '../lib/auth.js';
 import { randomUUID } from 'node:crypto';
 import { makeAnchor, SOURCE_TYPE } from '../lib/evidence.js';
+import { getObjectStore } from '../lib/objectstore.js';
+import { buildDataAssets, locateRegions, workflowView } from '../lib/data-assets/pipeline.js';
+import { idempotencyScope } from '../lib/jobstore.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
 
 export default async function handler(req, res) {
@@ -35,6 +38,9 @@ async function handleExtract(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
   const body = req.body && typeof req.body === 'object' ? req.body : safeParse(req.body);
+  if (body?.mpn !== undefined && (typeof body.mpn !== 'string' || !body.mpn.trim() || body.mpn.length > 100 || /[\x00-\x1f]/.test(body.mpn))) return res.status(400).json({error:'目标型号格式非法'});
+  const dataOnly = body?.assetMode === 'data';
+  if (body?.assetMode && !['data','full'].includes(body.assetMode)) return res.status(400).json({error:'未知资产模式'});
   const uploaded = typeof body?.pdfBase64 === 'string' && body.pdfBase64.length > 0;
   let v;
   let uploadedBuf = null;
@@ -60,7 +66,7 @@ async function handleExtract(req, res) {
 
   const apiKey = process.env.GEMINI_API_KEY;
   const mockAllowed = process.env.MOCK_MODE === '1'; // P0-3：mock 必须显式开启，缺 Key 不再静默回退演示数据
-  if (!apiKey && !mockAllowed) {
+  if (!apiKey && !mockAllowed && !dataOnly) {
     return res.status(503).json({
       error: '服务未配置：缺少 GEMINI_API_KEY（不再自动回退演示数据）。请在部署环境变量配置 Key，或显式设置 MOCK_MODE=1 用于联调',
       code: 'model_not_configured'
@@ -72,6 +78,7 @@ async function handleExtract(req, res) {
       packages: MOCK_TMUXL27518.packages.map((p) => sanitizePackage(p)),
       pinsets: sanitizePinsets(MOCK_TMUXL27518.pinsets, []),
       figures: MOCK_TMUXL27518.figures,
+      dataAssets: buildDataAssets({part:MOCK_TMUXL27518.part, documentSha256:uploadedBuf ? sha256(uploadedBuf) : null, sourceUrl:v.url}),
       mock: true,                       // 服务端权威，客户端无法删除
       pdfUrl: v.url,
       // 图集裁剪复用：上传通道的 PDF 也必须缓存，否则 /api/job-pdf 无字节可返回（409）。
@@ -96,6 +103,7 @@ async function handleExtract(req, res) {
       packages: job.ir.packages,      // 唯一 packages 字段，直接取自持久化 Job IR
       pinsets: job.ir.pinsets,
       figures: job.ir.figures,
+      dataAssets: job.ir.dataAssets, workflow:workflowView(job.ir),
       mock: true,
       non_promotable: true,
       pdfToken: uploaded ? null : signPdfToken(v.url), // item 9：mock 响应同样提供 PDF 访问方式
@@ -153,7 +161,16 @@ async function handleExtract(req, res) {
     return res.status(502).json({ error: `数据手册下载失败: ${e.message}${tip}`, code: 'download_failed', suggestUpload: slow });
   }
 
-  const docSha = sha256(pdfBuf); // item 10：证据锚点的文档标识
+  const docSha = sha256(pdfBuf);
+  const extractOperation = dataOnly ? 'extract_data' : 'extract';
+  const idemKey = req.headers?.['idempotency-key'] ? sha256(String(req.headers['idempotency-key']) + '\0' + String(body?.mpn || '') + '\0' + (dataOnly ? 'data' : 'full')) : null;
+  const existingStore = await getJobStore();
+  if (idemKey) {
+    const cached = await existingStore.findByIdempotencyScope(idempotencyScope({tenantId:session.tenantId,ownerId:session.sub,operation:extractOperation,documentSha256:docSha,key:idemKey}));
+    if (cached) return res.status(200).json({jobId:cached.jobId,revision:cached.revision,part:cached.ir.part,packages:cached.ir.packages,pinsets:cached.ir.pinsets,figures:cached.ir.figures,dataAssets:cached.ir.dataAssets,workflow:workflowView(cached.ir),reused:true,meta:{mode:'cached',pdfUrl:cached.ir.pdfUrl}});
+  }
+  const documentObject = await getObjectStore().put(`documents/${sha256(session.tenantId)}/${docSha}.pdf`, pdfBuf, {contentType:'application/pdf'});
+  let parsedPages = [], parsedPageCount = 0, documentOcr = null;
 
   // ── 阶段 1：确定性程序化解析（零 AI 成本）──────────────────────────────
   // AI 只在程序化拿不到时按需介入；每个字段带来源溯源（parser / gemini）。
@@ -175,7 +192,8 @@ async function handleExtract(req, res) {
       }
 
       const { findPartInfo, parsePinTable, findFigures, selectRelevantPages, assignPinsets } = await import('../lib/heuristics.js');
-      let { pages } = await extractTextPages(pdfBuf);
+      let { pages, pageCount } = await extractTextPages(pdfBuf);
+      parsedPageCount = pageCount;
       let ocrInfo = null;
       // item 11：classify → pagesNeedingOcr → OCR Worker → mergedPages → 重跑程序解析。
       // 全扫描 PDF（文本层几乎为空）也必须进 OCR Worker，不能直接放弃程序解析。
@@ -189,6 +207,7 @@ async function handleExtract(req, res) {
         ocrInfo = { status: r.status, ocrPages: r.ocrPages, mustKeepPages: r.mustKeepPages, note: r.note };
         pages = r.mergedPages;            // 合并后的页面重新参与解析
       }
+      parsedPages = pages; documentOcr = ocrInfo;
       const totalText = pages.reduce((n, p) => n + p.lines.length, 0);
       if (totalText > 20) { // 有文本层（原生或 OCR 合并后）
         const pi = findPartInfo(pages, v.url);
@@ -212,20 +231,30 @@ async function handleExtract(req, res) {
     }
   }
 
+  if (dataOnly) {
+    const part = {...(det.part || {mpn:'UNKNOWN',manufacturer:'',title:'',description_zh:''}),...(body?.mpn ? {mpn:String(body.mpn).trim().slice(0,100)} : {})};
+    const ir = withStableIds({part,packages:[],pinsets:[],figures:[],mock:false,pdfUrl:v.url,documentSha256:docSha,documentObject,
+      dataAssets:buildDataAssets({part,pages:parsedPages,documentSha256:docSha,sourceUrl:v.url,pdfBytes:pdfBuf.length,pageCount:parsedPageCount,ocrStatus:documentOcr?.status})});
+    const job = await existingStore.create({ir,tenantId:session.tenantId,ownerId:session.sub,datasheetSha256:docSha,idempotencyKey:idemKey,operation:extractOperation,ttlMs:90*86400000});
+    return res.status(200).json({jobId:job.jobId,revision:job.revision,part:job.ir.part,packages:[],pinsets:[],figures:[],dataAssets:job.ir.dataAssets,workflow:workflowView(job.ir),meta:{mode:'data',pdfUrl:v.url,pdfBytes:pdfBuf.length}});
+  }
+
   // ── 阶段 2：按需 Gemini（封装机械尺寸通常必须 AI 读图；其余能省则省）────
   const need = {
     part: !det.part,
     packages: true,
+    parameters: true,
     pins: det.pinConfidence !== 'high',
     figures: det.figures.length === 0
   };
 
   try {
     // 相关页切片：只喂首页+管脚页+机械图页+图区页，token/时延双降；失败回退整本
+    if (!parsedPageCount) parsedPageCount = await (await import('../lib/pdfslice.js')).pageCountOf(pdfBuf);
     let geminiBuf = pdfBuf, sliced = false, pageMap = null, sliceStrategy = det.relevantPages.length ? 'parser_relevant_pages' : 'none';
     {
       const { slicePdf, pageCountOf } = await import('../lib/pdfslice.js');
-      let pagesToUse = det.relevantPages;
+      let pagesToUse = [...new Set([...det.relevantPages, ...locateRegions(parsedPages).flatMap(r=>[r.page,r.page+1]).filter(n=>n<=parsedPageCount)])].sort((a,b)=>a-b);
       if (!pagesToUse.length) {
         // item 11：不再"前 6 页 + 后 8 页"盲切。按页面证据选页：
         //   1) 有 pdf-inspector 画像时，剔除需 OCR 的页（喂过去也读不出文本，只会浪费预算）
@@ -266,7 +295,7 @@ async function handleExtract(req, res) {
       need,
       deadlineMs: Math.max(10000, remain() - 3000),
       hints: {
-        mpn: det.part?.mpn,
+        mpn: body?.mpn || det.part?.mpn,
         pinCount: need.pins ? undefined : det.pins.length,
         note: sliced ? 'The attached PDF contains only the relevant pages (first page, pin table, mechanical drawings) sliced from the full datasheet.' : undefined
       }
@@ -289,7 +318,7 @@ async function handleExtract(req, res) {
       packages = packages.map((p) => valid.has(p.pinsetId) ? p : { ...p, pinsetId: pinsets[0]?.id || 'default' });
     }
 
-    const part = need.part
+    let part = need.part
       ? {
           mpn: String(raw?.part?.mpn || '').trim() || det.part?.mpn || 'UNKNOWN',
           manufacturer: String(raw?.part?.manufacturer || '').trim(),
@@ -297,6 +326,7 @@ async function handleExtract(req, res) {
           description_zh: String(raw?.part?.description_zh || '').trim()
         }
       : det.part;
+    if(body?.mpn) part={...part,mpn:body.mpn.trim()};
     const recSet = pinsets.find((s2) => s2.id === packages[idx].pinsetId) || pinsets[0];
     const recDet = sanitizePinsDetailed(recSet ? recSet.pins : []);
     const pins = recDet.pins;
@@ -334,13 +364,15 @@ async function handleExtract(req, res) {
           pinsReviewRequired,
           pdfUrl: v.url,
           documentSha256: docSha,
-          // 图集裁剪复用（避免二次回源导致慢站超时）；超过 6MB 不缓存
-          pdfBase64: pdfBuf.length <= 6 * 1024 * 1024 ? pdfBuf.toString('base64') : null
+          documentObject,
+          dataAssets:buildDataAssets({part,pages:parsedPages,raw,documentSha256:docSha,sourceUrl:v.url,pdfBytes:pdfBuf.length,pageCount:parsedPageCount,ocrStatus:documentOcr?.status,modelPages:pageMap || Array.from({length:parsedPageCount},(_,i)=>i+1)}),
+          // 原文已保存为不可变对象；JSON 不再承载 PDF 字节。
+          pdfBase64: null
         }, { documentSha256: docSha });
         const job = await store.create({
           ir, tenantId: session.tenantId, ownerId: session.sub,
           datasheetSha256: docSha,
-          idempotencyKey: req.headers?.['idempotency-key'] || null, operation: 'extract'
+          idempotencyKey: idemKey || null, operation: extractOperation, ttlMs:90*86400000
         });
         // item 9：幂等复用返回既有 Job 时，**所有字段必须来自 job.ir**，
         // 不得把这次新提取生成的随机稳定 ID 返回给客户端。
@@ -348,6 +380,7 @@ async function handleExtract(req, res) {
           jobId: job.jobId, revision: job.revision,
           part: job.ir.part,
           packages: job.ir.packages, pinsets: job.ir.pinsets, figures: job.ir.figures,
+          dataAssets:job.ir.dataAssets,workflow:workflowView(job.ir),
           state: job.ir.lifecycle?.state || 'extracted',
           reused: job.ir !== ir
         };
@@ -374,14 +407,15 @@ async function handleExtract(req, res) {
         packages: [sanitizePackage({ pinCount: det.pins.length })],
         pinsets: sanitizePinsets(det.pinsets, det.pins),
         figures: (await import('../lib/figfilter.js')).filterFigures(sanitizeFigures(det.figures), { pkgCount: 1 }),
-        mock: false, degraded: true, pdfUrl: v.url, documentSha256: docSha,
-          // 图集裁剪复用（避免二次回源导致慢站超时）；超过 6MB 不缓存
-          pdfBase64: pdfBuf.length <= 6 * 1024 * 1024 ? pdfBuf.toString('base64') : null
+        mock: false, degraded: true, pdfUrl: v.url, documentSha256: docSha, documentObject,
+        dataAssets:buildDataAssets({part:det.part,pages:parsedPages,documentSha256:docSha,sourceUrl:v.url,pdfBytes:pdfBuf.length,pageCount:parsedPageCount,ocrStatus:documentOcr?.status}),
+          // 原文已保存为不可变对象；JSON 不再承载 PDF 字节。
+          pdfBase64: null
       }, { documentSha256: docSha });
       const dStore = await getJobStore();
       const dJob = await dStore.create({
         ir: degradedIr, tenantId: session.tenantId, ownerId: session.sub,
-        datasheetSha256: docSha, operation: 'extract'
+        datasheetSha256: docSha, operation: extractOperation,idempotencyKey:idemKey,ttlMs:90*86400000
       });
       return res.status(200).json({
         mock: false,
@@ -391,6 +425,7 @@ async function handleExtract(req, res) {
         pins: dJob.ir.pinsets[0]?.normalizedPins || [],
         pinsets: dJob.ir.pinsets,
         figures: dJob.ir.figures,
+        dataAssets:dJob.ir.dataAssets,workflow:workflowView(dJob.ir),
         jobId: dJob.jobId,
         revision: dJob.revision,
         status: dJob.ir.status || 'extracted',
@@ -458,6 +493,7 @@ function withStableIds(ir, { documentSha256 = null } = {}) {
 
 /** P0-1：切片 PDF 的派生页码 → 原文页码反向映射（页码是证据，映射不了就删除引用，绝不带错误页码出门） */
 function remapDerivedPages(raw, pageMap) {
+  for (const o of Array.isArray(raw?.parameterObservations) ? raw.parameterObservations : []) if(o && typeof o==='object') o.page = Number.isInteger(o.page) ? pageMap[o.page-1] ?? null : null;
   const map = (d) => {
     const n = Math.round(Number(d));
     return n >= 1 && n <= pageMap.length ? pageMap[n - 1] : null;

@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiExtract, apiGenerate, apiLoadJob } from './api.js';
 import { setLocalPdf, setPdfToken, setJobId } from './pdf.js';
 import { withFigureIds } from './figstate.js';
+import DataAssetsPanel from './components/DataAssetsPanel.jsx';
+import BatchPanel from './components/BatchPanel.jsx';
 import PinTable from './components/PinTable.jsx';
 import PackageForm from './components/PackageForm.jsx';
 import FigureEditor from './components/FigureEditor.jsx';
@@ -18,6 +20,8 @@ export default function App() {
   const embedded = params.get('embed') === '1' || window.self !== window.top;
 
   const [url, setUrl] = useState(params.get('pdf') || DEMO_URL);
+  const [assetMode,setAssetMode] = useState('full');
+  const [requestedMpn,setRequestedMpn] = useState('');
   const [file, setFile] = useState(null); // 上传模式的本地 PDF File
   const [session, setSession] = useState(null); // ezPLM 会话：{origin, nonce, jobId}
   const [reviewReason, setReviewReason] = useState('');   // item 6：统一审核理由（所有人工修改共用）
@@ -59,6 +63,21 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const id = params.get('job');
+    if (!id) return;
+    let live = true;
+    apiLoadJob(id).then(data => {
+      if (!live) return;
+      const packages = (data.packages || []).map(p => ({...p,include:true}));
+      setJobId(data.jobId);setUrl(data.meta?.pdfUrl || '');setPart(data.part);setAssetMode(packages.length?'full':'data');setRequestedMpn(data.part?.mpn || '');
+      setPkgs(packages);setPinsets(data.pinsets || []);setFigures(withFigureIds(data.figures));
+      setExtract({...data,pdfUrl:data.meta?.pdfUrl || '',__original:structuredClone({part:data.part,packages,pinsets:data.pinsets || [],figures:data.figures || []})});
+      setPhase('confirm');
+    }).catch(e => {if(live)setError(e.message);});
+    return () => {live=false;};
+  }, [params]);
+
   const doExtract = async (targetUrl, fileOverride) => {
     // 通道判定：仅当文件选择器显式传入 fileOverride 时走本地通道；
     // 「开始提取」按钮/回车/postMessage 一律以 URL 输入框为准（并清除残留的文件芯片）
@@ -92,7 +111,7 @@ export default function App() {
       } else {
         payload = { pdfUrl: u };
       }
-      const data = await apiExtract(payload);
+      const data = await apiExtract({...payload,assetMode,mpn:requestedMpn.trim()||undefined});
       setPdfToken(data.pdfToken);
       setJobId(data.jobId);   // v0.8.6：图集经 /api/job-pdf 取回，避免跨实例令牌与二次下载
       // pinsets 兼容：老响应无 pinsets 时由 pins 合成单一集
@@ -167,7 +186,7 @@ export default function App() {
     setExtract((e) => ({
       ...e,
       revision: ri.revision,
-      state: ri.state,
+      state: ri.state, dataAssets:ri.dataAssets, workflow:ri.workflow,
       __original: structuredClone({ part: ri.part, packages: ri.packages, pinsets: ri.pinsets, figures: ri.figures })
     }));
     return ri.revision;
@@ -354,10 +373,10 @@ export default function App() {
       {!embedded && (
         <header>
           <div>
-            <h1>DS2KiCad <span className="sub">数据手册 → KiCad 符号 / 封装 / 3D / 图区提取</span></h1>
-            <p>AI 负责语义提取 · 确定性规则引擎负责几何生成 · 全部结果经人工确认</p>
+            <h1>DS2KiCad <span className="sub">数据手册 → 参数、证据与 KiCad 资产</span></h1>
+            <p>从资料接入到资产发布 · 参数条件可追溯 · 支持单器件与批量处理</p>
           </div>
-          <span className="badge">eetree · ezPLM 插件预备版</span>
+          <span className="badge">eetree · 数据资产引擎</span>
         </header>
       )}
 
@@ -374,6 +393,7 @@ export default function App() {
             {phase === 'extracting' ? '提取中…（约 20–60 秒）' : '开始提取'}
           </button>
         </div>
+        <div className="asset-toolbar"><label>提取范围<select aria-label="提取范围" value={assetMode} onChange={e=>setAssetMode(e.target.value)} disabled={phase==='extracting'}><option value="full">完整资产：参数 + 符号 / 封装 / 3D</option><option value="data">文本参数提取（无需模型）</option></select></label><label>目标型号<input aria-label="目标型号" value={requestedMpn} onChange={e=>setRequestedMpn(e.target.value)} placeholder="可选：如 LM358"/></label></div>
         <div className="upload-row">
           <label className="btn-secondary upload-btn">
             📄 或上传本地 PDF（≤3MB）
@@ -406,7 +426,7 @@ export default function App() {
             已提取 {part?.mpn}
             {extract.meta?.mode === 'degraded'
               ? ` — ${extract.meta.warning}`
-              : `（${extract.meta?.model} · PDF ${Math.round((extract.meta?.pdfBytes || 0) / 1024)} KB）`}
+              : extract.meta?.model ? `（${extract.meta.model}）` : extract.meta?.restored ? ' · 已恢复保存的作业' : ' · 参数与证据已保存'}
           </p>
         )}
         {extract?.sources && (
@@ -421,8 +441,12 @@ export default function App() {
         )}
       </section>
 
+      {!embedded && <BatchPanel />}
+
       {phase !== 'idle' && extract && (
         <>
+          {extract.dataAssets && <DataAssetsPanel jobId={extract.jobId} revision={extract.revision} disabled={phase==='generating'} onRevision={rev=>{syncRevision(rev);setGenResult(null);}} />}
+          {pkgs.length > 0 && <>
           <section className="card">
             <h2>① 器件信息确认</h2>
             <p className="hint">
@@ -493,7 +517,7 @@ export default function App() {
           )}
 
           <section className="card generate-card">
-            <button className="btn-primary btn-big" disabled={phase === 'generating'} onClick={doGenerate}>
+            <button className="btn-primary btn-big" disabled={phase === 'generating' || !includeCount} onClick={doGenerate}>
               {phase === 'generating' ? '生成中…' : `✓ 确认无误，生成 ${includeCount} 个封装的 KiCad 符号 / 封装 / 3D`}
             </button>
             {/* v0.8.11：错误此前只渲染在页面顶部的 URL 卡片里，生成失败时用户看不到，
@@ -501,6 +525,7 @@ export default function App() {
             {error && <p className="error-line" style={{ marginTop: 10 }}>✕ {error}</p>}
           </section>
 
+          </>}
           <div id="preview-anchor" />
           {genResult && (
             <>
