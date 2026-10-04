@@ -108,3 +108,13 @@ E2E_BASE_URL=http://localhost:5173 E2E_SESSION_SECRET=<local-test-secret> npx pl
 2. 厂商目录接入、文档更新差异、OrderingVariant和Schema扩展。
 3. 对接ezPLM已有封装/3D候选库，几何与Pin-Pad验证，CAD/STEP Worker。
 4. 厂商确认门户、更新维护SLA、API分发、使用分析。赞助标识与技术事实分离。
+# 浏览器验收：无需 S3 的 Preview 模式
+
+升级分支支持 `OBJECT_STORE_MODE=preview-postgres`。它只在 `VERCEL_ENV=preview` 生效，复用现有 PostgreSQL，将 PDF 和图片存入独立的 `ds2kicad_preview_objects` 表，跨函数实例和冷启动读取。生产环境不能用此模式；后续正式运行仍使用 S3 或持久化磁盘。
+
+- 为指定 Preview 分支设置 `PREVIEW_STORAGE_NAMESPACE`，单文件 20MB、命名空间合计 250MB；同内容重复写入不重复占空间。浏览器上传仍受平台请求限制，原始 PDF 最大 3MB；较大文件使用 URL。
+- 设置随机 `PREVIEW_ACCESS_CODE`（至少 24 字符）、`PREVIEW_ACCESS_EXPIRES_AT`、独立的 `EZPLM_JWT_SECRET/ISS/AUD` 和 `AUTH_MODE=production`。页面输入访问码后获得 HttpOnly、Secure Cookie，最长 24 小时，不超过访问码到期时间。
+- 测试身份固定归属 `preview-<namespace>`，具备审核和发布权限，无法访问其他租户作业。访问码不要公开分享；只用于持码测试人员。Vercel 的项目访问保护保持启用。
+- `CREDIT_ENFORCEMENT=0` 不扣平台积分；真实模型调用仍使用该项目的模型配额。未启用 Mock，也不绕过参数或 EDA 审核规则。
+- 推荐测试顺序：进入测试 → 上传小于 3MB 的厂商 PDF → 选择参数资产或完整 EDA → 确认型号、厂商、分类 → 核对参数、条件、适用型号、证据 → 接受或驳回全部候选 → 发布 → 下载 → 重新打开任务。
+- 数据不会自动清除。结束测试后停用访问码，按 `namespace` 删除测试对象前确认已导出需要的结果。测试发布只作为验收，迁移存储前必须复制对象并核对哈希，不能直接切换后端。

@@ -1,5 +1,6 @@
 // server/dev.js — 本地开发 API 宿主（生产环境由 Vercel 直接托管 /api 目录）
 import express from 'express';
+import previewAccessHandler from '../api/preview-access.js';
 import batchHandler from '../api/batch.js';
 import dataAssetsHandler from '../api/data-assets.js';
 import extractHandler from '../api/extract.js';
@@ -18,6 +19,7 @@ import jobHandler from '../api/job.js';
 
 const app = express();
 app.use(express.json({ limit: '8mb' }));
+app.all('/api/preview-access', previewAccessHandler);
 
 // v1.2 public/multi-channel entrypoints
 app.all('/api/platform-session', (req, res) => platformSessionHandler(req, res));

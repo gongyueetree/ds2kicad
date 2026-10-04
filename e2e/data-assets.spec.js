@@ -10,8 +10,14 @@ async function fixture(){
 }
 test('parameter workflow works in browser, survives reload, and fits a phone viewport',async({page,baseURL})=>{
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  await page.context().addCookies([{name:'ezplm_session',value:issueDevSession({sub:'e2e-reviewer',tenantId:'e2e-data',roles:['publisher']},secret),url:baseURL}]);
-  await page.goto('/');await expect(page.getByRole('heading',{name:/DS2KiCad/})).toBeVisible();
+  if (!process.env.E2E_PREVIEW_CODE) await page.context().addCookies([{name:'ezplm_session',value:issueDevSession({sub:'e2e-reviewer',tenantId:'e2e-data',roles:['publisher']},secret),url:baseURL}]);
+  await page.goto('/');
+  if (process.env.E2E_PREVIEW_CODE) {
+    await page.getByLabel('测试访问码').fill(process.env.E2E_PREVIEW_CODE);
+    await page.getByRole('button',{name:'进入测试',exact:true}).click();
+    await expect(page.getByText('DS2KiCad v1.3 测试环境',{exact:false})).toBeVisible();
+  }
+  await expect(page.getByRole('heading',{name:/DS2KiCad/})).toBeVisible();
   await expect(page.locator('vite-error-overlay')).toHaveCount(0);
   await page.screenshot({path:'/tmp/ds2-home.png',fullPage:true});
   await page.getByLabel('提取范围').selectOption('data');await page.getByLabel('目标型号').fill('TEST358');
