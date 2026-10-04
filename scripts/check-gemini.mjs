@@ -42,5 +42,7 @@ if (process.env.VERCEL_ENV === 'preview' && process.env.DS2_GEMINI_DIAGNOSTIC ==
     });
   }
   writeFileSync('dist/gemini-health.json',JSON.stringify(result,null,2));
+  const escaped = JSON.stringify(result,null,2).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  writeFileSync('dist/gemini-health.html',`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DS2KiCad Gemini 诊断</title><style>body{font:16px system-ui;max-width:960px;margin:40px auto;padding:20px;background:#f5f7fb;color:#142338}pre{background:white;padding:24px;border-radius:12px;white-space:pre-wrap;overflow-wrap:anywhere}</style><h1>Gemini 实际调用检查</h1><p>仅展示公开测试资料的诊断摘要；不包含密钥或用户文件。</p><pre>${escaped}</pre><a href="/">返回 DS2KiCad</a></html>`);
   console.log('[gemini-diagnostic]',JSON.stringify(result));
 }
