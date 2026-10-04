@@ -1,5 +1,6 @@
 // Public/multi-channel wrapper around the existing extraction handler.
 // One successful Datasheet→KiCad conversion consumes one Credit. Failed runs are refunded.
+import { createHash } from 'node:crypto';
 import extractHandler, { setCors } from './extract.js';
 import { authenticate } from '../lib/auth.js';
 import { reserveCredit, commitCredit, refundCredit } from '../lib/credits.js';
@@ -17,11 +18,12 @@ export default async function handler(req, res) {
   if (!auth.ok) return res.status(auth.status || 401).json({ error: auth.error });
   const session = auth.session;
   const reservation = await reserveCredit(session, 'datasheet_to_kicad', {
-    refKey: req.headers?.['idempotency-key'] || null,
+    refKey: req.headers?.['idempotency-key'] ? createHash('sha256').update(String(req.headers['idempotency-key']) + '\0' + JSON.stringify(req.body)).digest('hex') : null,
     metadata: { channel: session.channel || 'direct' }
   });
 
   if (!reservation.ok) {
+    if(reservation.code==='reservation_in_progress') return res.status(409).json({error:'同一任务正在执行，请稍后恢复',code:reservation.code});
     return res.status(402).json({
       error: session.guest
         ? '免费体验次数已用完。注册 ezPLM / eeHub 后可保存个人库并继续使用。'

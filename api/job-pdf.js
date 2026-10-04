@@ -6,6 +6,8 @@
 import { setCors } from './extract.js';
 import { getJobStore } from '../lib/jobstore.js';
 import { authenticate, authorizeJobAccess } from '../lib/auth.js';
+import { getObjectStore } from '../lib/objectstore.js';
+import { sha256 } from '../lib/jobstore.js';
 import { safeDownload } from '../lib/safedl.js';
 
 export const config = { runtime: 'nodejs' };
@@ -28,6 +30,14 @@ export default async function handler(req, res) {
   const az = authorizeJobAccess(session, job);
   if (!az.ok) return res.status(az.status).json({ error: az.error, code: az.code });
 
+  if (job.ir.documentObject) {
+    try {
+      const buf = await getObjectStore().get(job.ir.documentObject.key);
+      if (!buf || sha256(buf) !== job.ir.documentObject.sha256) return res.status(409).json({error:'原始文档缺失或哈希不匹配',code:'document_integrity_error'});
+      res.setHeader('Content-Type','application/pdf');res.setHeader('Cache-Control','private, max-age=600');
+      return res.status(200).send(buf);
+    } catch(e) { return res.status(503).json({error:'原始文档暂不可用',code:'object_store_unavailable'}); }
+  }
   // 1) 优先用作业内缓存的 PDF（extract 时已下载过，避免二次回源）
   if (job.ir.pdfBase64) {
     const buf = Buffer.from(job.ir.pdfBase64, 'base64');

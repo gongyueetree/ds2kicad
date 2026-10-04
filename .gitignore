@@ -3,3 +3,5 @@ dist/
 .env
 .vercel/
 nohup.out
+test-results/
+playwright-report/

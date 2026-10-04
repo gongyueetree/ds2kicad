@@ -1,5 +1,8 @@
 // server/dev.js — 本地开发 API 宿主（生产环境由 Vercel 直接托管 /api 目录）
 import express from 'express';
+import previewAccessHandler from '../api/preview-access.js';
+import batchHandler from '../api/batch.js';
+import dataAssetsHandler from '../api/data-assets.js';
 import extractHandler from '../api/extract.js';
 import platformExtractHandler from '../api/platform-extract.js';
 import platformSessionHandler from '../api/platform-session.js';
@@ -16,6 +19,7 @@ import jobHandler from '../api/job.js';
 
 const app = express();
 app.use(express.json({ limit: '8mb' }));
+app.all('/api/preview-access', previewAccessHandler);
 
 // v1.2 public/multi-channel entrypoints
 app.all('/api/platform-session', (req, res) => platformSessionHandler(req, res));
@@ -24,6 +28,9 @@ app.all('/api/credits', (req, res) => creditsHandler(req, res));
 app.all('/api/handoff', (req, res) => handoffHandler(req, res));
 app.all('/api/schematic-convert', (req, res) => schematicConvertHandler(req, res));
 app.all('/api/schematic-build', (req, res) => schematicBuildHandler(req, res));
+
+app.all('/api/batch', (req,res)=>batchHandler(req,res));
+app.all('/api/data-assets', (req,res)=>dataAssetsHandler(req,res));
 
 // Core Agent APIs (also kept for trusted/internal integration)
 app.all('/api/extract', (req, res) => extractHandler(req, res));
@@ -44,7 +51,7 @@ if (process.env.AUTH_MODE === 'dev') {
   });
 }
 
-const port = Number(process.env.PORT || 3001);
+const port = Number(process.env.PORT || process.env.DS2_API_PORT || 3001);
 app.listen(port, () => {
   const mock = process.env.MOCK_MODE === '1';
   const hasKey = !!process.env.GEMINI_API_KEY;
