@@ -20,7 +20,7 @@ async function post(path, body) {
     try { sessionStorage.setItem('ds2k_guest_token', data.guestToken); } catch {}
   }
   if (!r.ok) {
-    if (r.status === 504) {
+    if (r.status === 504 && !data.error) {
       throw apiError('服务端处理超时（大 PDF + AI 响应慢）。建议：① 直接重试 ② ti.com.cn 链接改用 www.ti.com 全球域名 ③ 确认 Vercel 函数时长上限 ≥60s', r.status, data);
     }
     if (r.status === 402 && data.code === 'credits_exhausted') {

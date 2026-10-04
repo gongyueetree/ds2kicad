@@ -157,7 +157,7 @@ node test/smoke.mjs         # 端到端冒烟（提取→生成回环 / SSRF / �
    - `GEMINI_MODEL`（可选，默认 `gemini-2.5-flash`）
    - `MOCK_MODE`（联调期可设 `1`，先打通 ezPLM 端到端链路再切真实 API——与 AltPart AI 的 mock 先行策略一致）
    - `ALLOWED_ORIGINS`（可选；默认已放行 `*.ezplm.cn` / `*.eetree.cn` 来源）
-3. Deploy。`vercel.json` 已配置 `extract` 函数 `maxDuration=60`（Hobby 计划需在 Project Settings 确认 Fluid Compute / 函数时长上限允许 60s，否则大 PDF 可能超时）。
+3. Deploy。`vercel.json` 已配置 `extract` / `platform-extract` 函数 `maxDuration=180`；应用提取预算默认 150 秒，为下载、解析及 Gemini 最多两次调用保留时间。
 
 **Vercel 平台约束与对策**（已内置）：
 

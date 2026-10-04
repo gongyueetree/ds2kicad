@@ -5,10 +5,10 @@
   "outputDirectory": "dist",
   "functions": {
     "api/extract.js": {
-      "maxDuration": 60
+      "maxDuration": 180
     },
     "api/platform-extract.js": {
-      "maxDuration": 60
+      "maxDuration": 180
     },
     "api/schematic-convert.js": {
       "maxDuration": 180

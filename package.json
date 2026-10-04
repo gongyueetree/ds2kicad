@@ -8,7 +8,7 @@
     "dev": "concurrently -k \"node server/dev.js\" \"vite\"",
     "dev:api": "node server/dev.js",
     "dev:web": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/check-gemini.mjs",
     "preview": "vite preview",
     "test": "node --test test/*.test.js",
     "e2e": "playwright test",

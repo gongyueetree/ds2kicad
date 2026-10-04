@@ -390,7 +390,7 @@ export default function App() {
             onKeyDown={(e) => e.key === 'Enter' && phase !== 'extracting' && doExtract()}
           />
           <button className="btn-primary" disabled={phase === 'extracting'} onClick={() => doExtract()}>
-            {phase === 'extracting' ? '提取中…（约 20–60 秒）' : '开始提取'}
+            {phase === 'extracting' ? '正在提取…' : '开始提取'}
           </button>
         </div>
         <div className="asset-toolbar"><label>提取范围<select aria-label="提取范围" value={assetMode} onChange={e=>setAssetMode(e.target.value)} disabled={phase==='extracting'}><option value="full">完整资产：参数 + 符号 / 封装 / 3D</option><option value="data">文本参数提取（无需模型）</option></select></label><label>目标型号<input aria-label="目标型号" value={requestedMpn} onChange={e=>setRequestedMpn(e.target.value)} placeholder="可选：如 LM358"/></label></div>
@@ -417,6 +417,7 @@ export default function App() {
             </span>
           )}
         </div>
+        {phase === 'extracting' && <p className="hint">正在读取资料并提取内容，复杂手册可能需要 1–2 分钟，请勿重复提交。</p>}
         {error && <p className="error-line">✕ {error}</p>}
         {extract?.mock && (
           <p className="mock-badge">MOCK 演示数据 — {extract.meta?.reason}，管脚与尺寸为演示占位，配置 GEMINI_API_KEY 后为真实提取</p>

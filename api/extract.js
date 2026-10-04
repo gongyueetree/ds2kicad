@@ -14,6 +14,7 @@ import { getObjectStore } from '../lib/objectstore.js';
 import { buildDataAssets, locateRegions, workflowView } from '../lib/data-assets/pipeline.js';
 import { idempotencyScope } from '../lib/jobstore.js';
 import { MOCK_TMUXL27518 } from '../lib/mock/tmuxl27518.js';
+import { checkRequestedPart } from '../lib/part-match.js';
 
 export default async function handler(req, res) {
   try {
@@ -27,8 +28,12 @@ export default async function handler(req, res) {
 
 async function handleExtract(req, res) {
   const t0 = Date.now();
-  const budgetMs = Number(process.env.EXTRACT_BUDGET_MS || 50000); // 平台 60s 上限内主动收口
+  const configuredBudget = Number(process.env.EXTRACT_BUDGET_MS || 150000);
+  const budgetMs = Number.isFinite(configuredBudget) ? Math.min(155000,Math.max(10000,configuredBudget)) : 150000;
   const remain = () => budgetMs - (Date.now() - t0);
+  const requestId = randomUUID();
+  res.setHeader('X-Request-Id',requestId);
+  const trace = (stage, detail = {}) => console.info('[extract]',JSON.stringify({requestId,stage,elapsedMs:Date.now()-t0,...detail}));
   setCors(res, req);
   if (req.method === 'OPTIONS') return res.status(204).end();
   const auth = authenticate(req);          // item 10：ezPLM 会话鉴权，浏览器不持密钥
@@ -162,6 +167,7 @@ async function handleExtract(req, res) {
   }
 
   const docSha = sha256(pdfBuf);
+  trace('download_complete',{bytes:pdfBuf.length,uploaded});
   const extractOperation = dataOnly ? 'extract_data' : 'extract';
   const idemKey = req.headers?.['idempotency-key'] ? sha256(String(req.headers['idempotency-key']) + '\0' + String(body?.mpn || '') + '\0' + (dataOnly ? 'data' : 'full')) : null;
   const existingStore = await getJobStore();
@@ -231,6 +237,10 @@ async function handleExtract(req, res) {
     }
   }
 
+  trace('parse_complete',{pageCount:parsedPageCount,parsedPages:parsedPages.length,pinConfidence:det.pinConfidence});
+  const mismatch = checkRequestedPart({requested:body?.mpn,detected:det.part?.mpn,pages:parsedPages});
+  if (mismatch) return res.status(422).json({...mismatch,requestId});
+
   if (dataOnly) {
     const part = {...(det.part || {mpn:'UNKNOWN',manufacturer:'',title:'',description_zh:''}),...(body?.mpn ? {mpn:String(body.mpn).trim().slice(0,100)} : {})};
     const ir = withStableIds({part,packages:[],pinsets:[],figures:[],mock:false,pdfUrl:v.url,documentSha256:docSha,documentObject,
@@ -287,13 +297,15 @@ async function handleExtract(req, res) {
         if (s) { geminiBuf = s.buf; sliced = true; pageMap = s.pageMap; }
       }
     }
+    trace('gemini_start',{model:process.env.GEMINI_MODEL || 'gemini-2.5-flash',inputBytes:geminiBuf.length,selectedPages:pageMap?.length || parsedPageCount,remainingMs:remain()});
     const raw = await extractWithGemini({
       pdfBase64: geminiBuf.toString('base64'),
       apiKey,
       model: process.env.GEMINI_MODEL,
       sourceUrl: v.url,
       need,
-      deadlineMs: Math.max(10000, remain() - 3000),
+      deadlineMs: Math.max(0, remain() - 5000),
+      onAttempt: event => trace('gemini_attempt',event),
       hints: {
         mpn: body?.mpn || det.part?.mpn,
         pinCount: need.pins ? undefined : det.pins.length,
@@ -399,6 +411,7 @@ async function handleExtract(req, res) {
       }
     });
   } catch (e) {
+    trace('extraction_failed',{code:e.code || 'extraction_error',httpStatus:e.httpStatus});
     // Gemini 整体失败：若程序化已拿到管脚高置信结果，降级返回（封装参数留给用户手填）
     if (det.pinConfidence === 'high') {
       // item 1：degraded 也必须先落库，再从 Job IR 回读，保证响应与库内 IR 逐字段一致
@@ -434,7 +447,7 @@ async function handleExtract(req, res) {
         meta: { mode: 'degraded', warning: `AI 不可用（${e.message}），封装尺寸为默认值，请手工核对`, pdfUrl: v.url, pdfBytes: pdfBuf.length }
       });
     }
-    return res.status(502).json({ error: `AI 提取失败: ${e.message}` });
+    return res.status(e.code==='gemini_timeout'?504:502).json({ error: `AI 提取失败: ${e.message}`,code:e.code || 'extraction_failed',requestId });
   }
 }
 
